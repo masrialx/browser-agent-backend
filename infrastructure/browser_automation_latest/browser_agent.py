@@ -329,8 +329,10 @@ The browser window(s) may remain open for you to complete CAPTCHAs manually if n
                 
                 system_instruction = """You are an AI assistant that suggests fallback search strategies when primary search is blocked.
 
+IMPORTANT: DO NOT suggest Google as a fallback. Google is not allowed.
+
 Given a user query, suggest appropriate fallback strategies including:
-1. Alternative search engines (Bing, DuckDuckGo)
+1. Alternative search engines (Bing only - NO GOOGLE) - DuckDuckGo is the default
 2. Site-specific searches on relevant authoritative sources
 3. Cached version searches
 4. For news queries: suggest news sites (bbc.com, techcrunch.com, reuters.com, cnn.com, theverge.com)
@@ -339,13 +341,13 @@ Given a user query, suggest appropriate fallback strategies including:
 
 Return a list of fallback strategies with:
 - type: "search_engine" | "site_search" | "cache"
-- engine: "bing" | "duckduckgo" (if type is search_engine)
+- engine: "bing" only (if type is search_engine) - DO NOT suggest Google
 - site: domain name like "bbc.com" (if type is site_search)
 - query: the search query to use
 - description: human-readable description
 
 Always prioritize:
-1. Alternative search engines (Bing, DuckDuckGo) first
+1. Alternative search engines (Bing only - NO GOOGLE) - since DuckDuckGo is default
 2. Then site-specific searches on relevant authoritative sources
 3. Finally cached version searches
 
@@ -393,7 +395,11 @@ Return as JSON with a "fallbacks" array."""
                             # Validate engine for search_engine type
                             if fb_type == "search_engine":
                                 engine = fallback_dict.get("engine", "").lower()
-                                if engine not in ["bing", "duckduckgo"]:
+                                # DO NOT allow Google - only Bing
+                                if engine == "google":
+                                    logger.warning(f"Google is not allowed as fallback, skipping")
+                                    continue
+                                if engine not in ["bing"]:
                                     logger.warning(f"Invalid engine: {engine}, defaulting to bing")
                                     fallback_dict["engine"] = "bing"
                             
@@ -418,21 +424,16 @@ Return as JSON with a "fallbacks" array."""
                 logger.error(f"LLM fallback reasoning failed: {e}, using default fallbacks")
         
         # Default fallback strategies (fallback logic)
+        # Since DuckDuckGo is default, fallback to Bing only (NO GOOGLE)
         fallbacks = []
         query_lower = query.lower()
         
-        # Always try alternative search engines first
+        # Try Bing as fallback (NO GOOGLE)
         fallbacks.append({
             "type": "search_engine",
             "engine": "bing",
             "query": query,
             "description": f"Search Bing for {query}"
-        })
-        fallbacks.append({
-            "type": "search_engine",
-            "engine": "duckduckgo",
-            "query": query,
-            "description": f"Search DuckDuckGo for {query}"
         })
         
         # For news queries, try news sites
@@ -484,13 +485,18 @@ Return as JSON with a "fallbacks" array."""
                 engine = fallback.get("engine")
                 query = fallback.get("query", original_query)
                 
-                if engine == "bing":
+                # DO NOT use Google - skip if Google is requested
+                if engine == "google":
+                    logger.warning("Google fallback requested but not allowed. Skipping.")
+                    return TaskResult(
+                        success=False,
+                        message="Google is not allowed as fallback",
+                        error="Google not allowed",
+                        data={"query": query, "fallback": fallback}
+                    )
+                elif engine == "bing":
                     result = await self.SEARCH_BING(query)
                     # Results are already included in SEARCH_BING response
-                    return result
-                elif engine == "duckduckgo":
-                    result = await self.SEARCH_DUCKDUCKGO(query)
-                    # Results are already included in SEARCH_DUCKDUCKGO response
                     return result
                     
             elif fallback_type == "site_search":
@@ -537,24 +543,28 @@ Return as JSON with a "fallbacks" array."""
                 from pydantic import BaseModel
                 
                 class ActionPlanSchema(BaseModel):
-                    action: str  # OPEN_URL, SEARCH_GOOGLE, READ_PAGE, FIX_ISSUE
+                    action: str  # OPEN_URL, SEARCH_DUCKDUCKGO, SEARCH_GOOGLE, READ_PAGE, FIX_ISSUE
                     target: str  # URL or search query
                     reason: str
                     expected_outcome: str
                 
                 system_instruction = """You are an AI assistant that analyzes user queries and determines the best browser automation action.
 
+IMPORTANT: DO NOT use Google. Only use DuckDuckGo for searches.
+
 Analyze the user query and determine:
 1. Does the query contain a URL? If yes, extract the full URL.
 2. What is the user's intent? (search for information, open a website, read a page, fix an issue)
-3. What action should be taken? Choose one of: OPEN_URL, SEARCH_GOOGLE, READ_PAGE, FIX_ISSUE
+3. What action should be taken? Choose one of: OPEN_URL, SEARCH_DUCKDUCKGO, READ_PAGE, FIX_ISSUE
 4. What are the search terms if it's a search query? (extract key terms, remove command words like "search", "find", "look for")
 5. What is the expected outcome?
 
 Rules:
 - If URL is present: action = "OPEN_URL", target = the URL
-- If search intent: action = "SEARCH_GOOGLE", target = cleaned search terms (remove "search for", "find", etc.)
-- If information request without URL: action = "SEARCH_GOOGLE", target = the query terms
+- If search intent: action = "SEARCH_DUCKDUCKGO", target = cleaned search terms (remove "search for", "find", etc.)
+- DEFAULT: Use DuckDuckGo as the ONLY search engine - DO NOT use Google
+- DO NOT suggest SEARCH_GOOGLE - it is not allowed
+- If information request without URL: action = "SEARCH_DUCKDUCKGO", target = the query terms
 - Be smart about extracting search terms - remove filler words but keep the core meaning
 
 Return your analysis as JSON with: action, target, reason, expected_outcome"""
@@ -575,11 +585,15 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     
                     # Validate the response
                     if hasattr(response, 'action') and hasattr(response, 'target'):
-                        # Validate action is one of the allowed values
-                        allowed_actions = ["OPEN_URL", "SEARCH_GOOGLE", "READ_PAGE", "FIX_ISSUE"]
+                        # Validate action is one of the allowed values (NO GOOGLE)
+                        allowed_actions = ["OPEN_URL", "SEARCH_DUCKDUCKGO", "READ_PAGE", "FIX_ISSUE"]
                         if response.action not in allowed_actions:
-                            logger.warning(f"Invalid action from LLM: {response.action}, defaulting to SEARCH_GOOGLE")
-                            response.action = "SEARCH_GOOGLE"
+                            logger.warning(f"Invalid action from LLM: {response.action}, defaulting to SEARCH_DUCKDUCKGO")
+                            response.action = "SEARCH_DUCKDUCKGO"
+                        # DO NOT allow SEARCH_GOOGLE - convert to SEARCH_DUCKDUCKGO
+                        if response.action == "SEARCH_GOOGLE":
+                            logger.warning("LLM suggested Google, but Google is not allowed. Converting to DuckDuckGo.")
+                            response.action = "SEARCH_DUCKDUCKGO"
                         
                         # Ensure target is not empty
                         if not response.target or not response.target.strip():
@@ -618,11 +632,11 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                 expected_outcome="Navigate to the specified website"
             )
         
-        # Default: search Google (fallback)
+        # Default: search DuckDuckGo (fallback)
         return ActionPlan(
-            action="SEARCH_GOOGLE",
+            action="SEARCH_DUCKDUCKGO",
             target=query,
-            reason="No specific URL provided, using Google search (fallback logic)",
+            reason="No specific URL provided, using DuckDuckGo search (default search engine)",
             expected_outcome="Find relevant information"
         )
     
@@ -645,7 +659,7 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Opening URL: {url}")
             await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(2)  # Wait for page to fully load
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
             
             # Check for CAPTCHA immediately after page load
             captcha_found = await self.DETECT_CAPTCHA()
@@ -727,9 +741,10 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Searching Bing for: {query}")
             
-            # Navigate to Bing
+            # Navigate to Bing and wait for full load
+            logger.info("Navigating to Bing...")
             await self.page.goto("https://www.bing.com", wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(1)
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
             
             # Check for CAPTCHA
             captcha_found = await self.DETECT_CAPTCHA()
@@ -749,31 +764,41 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     }
                 )
             
-            # Find search box
+            # Find search box - try multiple selectors with proper waiting
+            logger.info("Waiting for Bing search box to be ready...")
             search_selectors = ['input[name="q"]', 'input[type="search"]', '#sb_form_q']
             search_box = None
+            
             for selector in search_selectors:
-                try:
-                    search_box = await self.page.query_selector(selector)
-                    if search_box:
-                        break
-                except:
-                    continue
+                search_box = await self.WAIT_FOR_ELEMENT_READY(selector, timeout=5000, max_retries=3)
+                if search_box:
+                    logger.info(f"Found Bing search box using selector: {selector}")
+                    break
             
             if not search_box:
                 return TaskResult(
                     success=False,
-                    message="Could not find Bing search box",
+                    message="Could not find Bing search box after multiple attempts",
                     error="Search box element not found",
                     data={"query": query, "search_engine": "bing"}
                 )
             
-            # Type search query
-            await search_box.fill(query)
+            # Type search query - clear first, then type
+            logger.info(f"Typing search query: {query}")
+            await search_box.click()  # Focus on the element
+            await asyncio.sleep(0.3)
+            await search_box.fill('')  # Clear any existing text
+            await asyncio.sleep(0.2)
+            await search_box.type(query, delay=50)  # Type with delay for reliability
             await asyncio.sleep(0.5)
+            
+            # Submit search
+            logger.info("Submitting search...")
             await search_box.press("Enter")
-            await self.page.wait_for_load_state('networkidle', timeout=10000)
-            await asyncio.sleep(2)
+            
+            # Wait for search results page to load
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(2)  # Additional wait for results to render
             
             # Check for CAPTCHA on results page
             captcha_found = await self.DETECT_CAPTCHA()
@@ -836,9 +861,10 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Searching DuckDuckGo for: {query}")
             
-            # Navigate to DuckDuckGo
+            # Navigate to DuckDuckGo and wait for full load
+            logger.info("Navigating to DuckDuckGo (default search engine)...")
             await self.page.goto("https://www.duckduckgo.com", wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(1)
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
             
             # Check for CAPTCHA
             captcha_found = await self.DETECT_CAPTCHA()
@@ -858,31 +884,41 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     }
                 )
             
-            # Find search box
+            # Find search box - wait for it to be visible, enabled, and interactive
+            logger.info("Waiting for DuckDuckGo search box to be ready...")
             search_selectors = ['input[name="q"]', 'input[type="search"]', '#search_form_input_homepage']
             search_box = None
+            
             for selector in search_selectors:
-                try:
-                    search_box = await self.page.query_selector(selector)
-                    if search_box:
-                        break
-                except:
-                    continue
+                search_box = await self.WAIT_FOR_ELEMENT_READY(selector, timeout=10000, max_retries=5)
+                if search_box:
+                    logger.info(f"Found DuckDuckGo search box using selector: {selector}")
+                    break
             
             if not search_box:
                 return TaskResult(
                     success=False,
-                    message="Could not find DuckDuckGo search box",
+                    message="Could not find DuckDuckGo search box after multiple attempts",
                     error="Search box element not found",
                     data={"query": query, "search_engine": "duckduckgo"}
                 )
             
-            # Type search query
-            await search_box.fill(query)
+            # Type search query - clear first, then type
+            logger.info(f"Typing search query: {query}")
+            await search_box.click()  # Focus on the element
+            await asyncio.sleep(0.3)
+            await search_box.fill('')  # Clear any existing text
+            await asyncio.sleep(0.2)
+            await search_box.type(query, delay=50)  # Type with delay for reliability
             await asyncio.sleep(0.5)
+            
+            # Submit search
+            logger.info("Submitting search...")
             await search_box.press("Enter")
-            await self.page.wait_for_load_state('networkidle', timeout=10000)
-            await asyncio.sleep(2)
+            
+            # Wait for search results page to load
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(2)  # Additional wait for results to render
             
             # Check for CAPTCHA on results page
             captcha_found = await self.DETECT_CAPTCHA()
@@ -932,7 +968,8 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
     
     async def SITE_SPECIFIC_SEARCH(self, site: str, query: str) -> TaskResult:
         """
-        Perform a site-specific search using Google's site: operator.
+        Perform a site-specific search using DuckDuckGo's site: operator.
+        NO GOOGLE - only use DuckDuckGo or Bing.
         
         Args:
             site: Site domain (e.g., "bbc.com", "techcrunch.com")
@@ -945,13 +982,13 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             site_query = f"site:{site} {query}"
             logger.info(f"Performing site-specific search: {site_query}")
             
-            # Try with Google first, but if CAPTCHA, try Bing
-            result = await self.SEARCH_GOOGLE(site_query)
-            if result.error != "CAPTCHA_DETECTED":
+            # Try with DuckDuckGo first (NO GOOGLE)
+            result = await self.SEARCH_DUCKDUCKGO(site_query)
+            if result.success and result.error != "CAPTCHA_DETECTED":
                 return result
             
-            # If Google has CAPTCHA, try Bing
-            logger.info(f"Google blocked, trying Bing for site search: {site_query}")
+            # If DuckDuckGo has CAPTCHA or fails, try Bing (NO GOOGLE)
+            logger.info(f"DuckDuckGo blocked, trying Bing for site search: {site_query}")
             return await self.SEARCH_BING(site_query)
         except Exception as e:
             logger.error(f"Error in site-specific search: {e}")
@@ -1232,9 +1269,10 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Searching Google for: {query}")
             
-            # Navigate to Google
+            # Navigate to Google and wait for full load
+            logger.info("Navigating to Google...")
             await self.page.goto("https://www.google.com", wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(1)
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
             
             # Check for CAPTCHA on Google homepage
             captcha_found = await self.DETECT_CAPTCHA()
@@ -1262,7 +1300,8 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     }
                 )
             
-            # Find search box - try multiple selectors
+            # Find search box - wait for it to be visible, enabled, and interactive
+            logger.info("Waiting for Google search box to be ready...")
             search_selectors = [
                 'textarea[name="q"]',
                 'input[name="q"]',
@@ -1272,29 +1311,35 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             search_box = None
             for selector in search_selectors:
-                try:
-                    search_box = await self.page.query_selector(selector)
-                    if search_box:
-                        break
-                except:
-                    continue
+                search_box = await self.WAIT_FOR_ELEMENT_READY(selector, timeout=5000, max_retries=3)
+                if search_box:
+                    logger.info(f"Found Google search box using selector: {selector}")
+                    break
             
             if not search_box:
                 return TaskResult(
                     success=False,
-                    message="Could not find Google search box",
+                    message="Could not find Google search box after multiple attempts",
                     error="Search box element not found",
                     data={"query": query}
                 )
             
-            # Type search query
-            await search_box.fill(query)
+            # Type search query - clear first, then type
+            logger.info(f"Typing search query: {query}")
+            await search_box.click()  # Focus on the element
+            await asyncio.sleep(0.3)
+            await search_box.fill('')  # Clear any existing text
+            await asyncio.sleep(0.2)
+            await search_box.type(query, delay=50)  # Type with delay for reliability
             await asyncio.sleep(0.5)
             
             # Submit search
+            logger.info("Submitting search...")
             await search_box.press("Enter")
-            await self.page.wait_for_load_state('networkidle', timeout=10000)
-            await asyncio.sleep(2)
+            
+            # Wait for search results page to load
+            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(2)  # Additional wait for results to render
             
             # Check for CAPTCHA on search results page
             captcha_found = await self.DETECT_CAPTCHA()
@@ -1889,18 +1934,19 @@ Provide a concise summary."""
                         logger.warning("CAPTCHA not resolved. Stopping automation.")
                         return read_result
                 
-            elif plan.action == "SEARCH_GOOGLE":
-                # Step 1: Attempt primary search on Google
-                result = await self.SEARCH_GOOGLE(plan.target)
-                self.RECORD_STEP(f"Searched Google for: {plan.target}", result)
+            elif plan.action == "SEARCH_DUCKDUCKGO":
+                # Step 1: Attempt primary search on DuckDuckGo (default search engine)
+                result = await self.SEARCH_DUCKDUCKGO(plan.target)
+                self.RECORD_STEP(f"Searched DuckDuckGo for: {plan.target}", result)
                 
-                # Step 2: Check if CAPTCHA was detected
-                if result.error == "CAPTCHA_DETECTED":
-                    logger.warning("CAPTCHA detected on Google. Trying fallback strategies...")
+                # Step 2: Check if CAPTCHA was detected or search failed
+                # NO GOOGLE FALLBACK - only use DuckDuckGo and other non-Google fallbacks
+                if result.error == "CAPTCHA_DETECTED" or not result.success:
+                    logger.warning("DuckDuckGo search failed or blocked. Trying alternative fallback strategies (excluding Google)...")
                     
-                    # Get fallback strategies
+                    # Get fallback strategies (NO GOOGLE)
                     fallbacks = await self.REASON_AND_CHOOSE_FALLBACK(plan.target)
-                    logger.info(f"Trying {len(fallbacks)} fallback strategies...")
+                    logger.info(f"Trying {len(fallbacks)} fallback strategies (NO GOOGLE)...")
                     
                     # Try each fallback
                     fallback_success = False
