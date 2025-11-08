@@ -1,0 +1,254 @@
+import asyncio
+import json
+import logging
+from typing import Dict, Optional, List
+from infrastructure.browser_automation_latest.browser_agent import BrowserAgent, TaskResult
+from infrastructure.llm.open_ai_llm import GeminiLLMService
+from infrastructure.repositories.agent_repository import AgentRepository
+from infrastructure.repositories.workstream_repository import WorkstreamRepository
+from domain.models.workstream import Workstream
+from domain.models.module import Module, Frequency
+from domain.models.kpi import KPI
+import uuid
+
+from pydantic import BaseModel
+class ArraySchema(BaseModel):
+    array: list
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+class BrowserUseCase:
+    def __init__(self, llm_service: GeminiLLMService, 
+                 agent_repository: AgentRepository, 
+                 workstream_repository: WorkstreamRepository):
+        self.llm_service = llm_service
+        self.agent_repository = agent_repository
+        self.workstream_repository = workstream_repository
+
+    async def execute_browser_task_async(self, query: str, agent_id: Optional[str] = None, user_id: Optional[str] = None) -> Dict:
+        """
+        Execute browser task with enhanced reasoning and strict JSON output format.
+        
+        Args:
+            query: User query describing the task
+            agent_id: Optional agent identifier
+            user_id: Optional user identifier
+            
+        Returns:
+            Dict matching the strict JSON format:
+            {
+                "agent_id": "<agent_id>",
+                "overall_success": true|false,
+                "query": "<original query>",
+                "steps": [
+                    {
+                        "step": "<description>",
+                        "result": {
+                            "data": {"title": "...", "url": "..."},
+                            "error": null|"error message",
+                            "message": "<execution message>",
+                            "success": true|false
+                        },
+                        "success": true|false
+                    }
+                ]
+            }
+        """
+        try:
+            user_id = user_id or "default_user"
+            agent_id = agent_id or f"agent_{uuid.uuid4().hex[:8]}"
+            
+            logger.info(f"Executing browser task: {query} for agent: {agent_id}")
+            
+            # Initialize browser agent with LLM service for reasoning
+            browser_agent = BrowserAgent(
+                task_query=query,
+                llm_service=self.llm_service,
+                user_id=user_id,
+                agent_id=agent_id
+            )
+            
+            # Execute the task
+            final_result: TaskResult = await browser_agent.run()
+            
+            # Get all recorded steps
+            recorded_steps = browser_agent.get_recorded_steps()
+            
+            # If no steps were recorded, create one from the final result
+            if not recorded_steps:
+                recorded_steps = [{
+                    "step": f"Execute task: {query}",
+                    "success": final_result.success,
+                    "result": final_result.dict()
+                }]
+            
+            # Format steps to match required structure
+            formatted_steps = []
+            for step in recorded_steps:
+                # Ensure result has the required structure
+                result = step.get("result", {})
+                if isinstance(result, dict):
+                    # Ensure data field exists with title and url
+                    if "data" not in result:
+                        result["data"] = {}
+                    if "title" not in result["data"]:
+                        result["data"]["title"] = result.get("data", {}).get("title", "")
+                    if "url" not in result["data"]:
+                        result["data"]["url"] = result.get("data", {}).get("url", "")
+                    # Ensure error field exists
+                    if "error" not in result:
+                        result["error"] = None
+                    # Ensure message field exists
+                    if "message" not in result:
+                        result["message"] = result.get("message", "")
+                    # Ensure success field exists
+                    if "success" not in result:
+                        result["success"] = step.get("success", False)
+                
+                formatted_step = {
+                    "step": step.get("step", "Unknown step"),
+                    "result": result,
+                    "success": step.get("success", False)
+                }
+                formatted_steps.append(formatted_step)
+            
+            # Calculate overall success
+            overall_success = all(step.get("success", False) for step in formatted_steps) and final_result.success
+            
+            # Build response in required format
+            response = {
+                "agent_id": agent_id,
+                "overall_success": overall_success,
+                "query": query,
+                "steps": formatted_steps
+            }
+            
+            # Cleanup browser agent
+            await browser_agent.cleanup()
+            
+            # Save workstream if agent_id is provided and task succeeded
+            if agent_id and overall_success:
+                try:
+                    sub_functions = self.generate_sub_functions("browser_task", {"query": query})
+                    modules = [
+                        Module(
+                            module=sf.get("name", sf.get("step", "unknown")),
+                            kpis=[],
+                            frequency=Frequency.NOT_REQUIRED.value,
+                            apis=[]
+                        ) for sf in sub_functions
+                    ]
+                    kpis = [KPI(kpi="Task completed", expected_value="100%")]
+                    workstream = Workstream(
+                        work_stream_id=f"ws_{uuid.uuid4().hex}",
+                        sub_goal_id=f"sg_{uuid.uuid4().hex}",
+                        goal_id=f"g_{uuid.uuid4().hex}",
+                        agent_id=agent_id,
+                        workstream=f"Execute browser task for {query}",
+                        modules=modules,
+                        frequency="once",
+                        kpis=kpis
+                    )
+                    self.workstream_repository.create_workstream(workstream)
+                except Exception as e:
+                    logger.warning(f"Failed to create workstream: {e}")
+            
+            return response
+
+        except Exception as e:
+            logger.exception(f"Browser task execution failed: {str(e)}")
+            # Return error response in required format
+            return {
+                "agent_id": agent_id or "unknown",
+                "overall_success": False,
+                "query": query,
+                "steps": [
+                    {
+                        "step": f"Execute task: {query}",
+                        "success": False,
+                        "result": {
+                            "success": False,
+                            "message": "Task execution failed",
+                            "data": {
+                                "title": "",
+                                "url": ""
+                            },
+                            "error": str(e)
+                        }
+                    }
+                ]
+            }
+
+    def generate_sub_functions(self, function_name: str, args: dict) -> List[dict]:
+        """Generate sub-functions for a browser task."""
+        system_instruction = """You are an AI assistant that breaks down browser tasks into sub-functions."""
+        example = json.dumps([
+            {"name": "open_browser", "args": {"url": "https://www.google.com"}},
+            {"name": "type_query", "args": {"query": "test"}},
+            {"name": "click_search", "args": {}}
+        ])
+        query = f"""
+        Given the browser function '{function_name}' with arguments {json.dumps(args)},
+        provide a list of sub-functions to accomplish it.
+        Each sub-function should have a name and arguments.
+        Example for 'search_google(query="test")': {example}
+        Return your response as a JSON list.
+        """
+        try:
+            response = self.llm_service.generate_content_with_Structured_schema(
+                system_instruction=system_instruction,
+                query=query,
+                response_schema=ArraySchema
+            )
+            if not isinstance(response.array, list):
+                logger.error(f"Invalid sub-functions response: {response.array}")
+                return []
+            return [json.loads(item) if isinstance(item, str) else item for item in response.array]
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse sub-functions: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Error generating sub-functions: {str(e)}")
+            return []
+
+    def execute_browser_task(self, query: str, agent_id: Optional[str] = None, user_id: Optional[str] = None) -> Dict:
+        """
+        Synchronous wrapper for execute_browser_task_async.
+        
+        Args:
+            query: User query
+            agent_id: Optional agent identifier
+            user_id: Optional user identifier
+            
+        Returns:
+            Dict with execution results in strict JSON format
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self.execute_browser_task_async(query, agent_id, user_id))
+        except SystemExit:
+            logger.info("Synchronous execution terminated due to manual browser closure")
+            return {
+                "agent_id": agent_id or "unknown",
+                "overall_success": False,
+                "query": query,
+                "steps": [
+                    {
+                        "step": f"Execute task: {query}",
+                        "success": False,
+                        "result": {
+                            "success": False,
+                            "message": "Program terminated due to manual browser closure",
+                            "data": {
+                                "title": "",
+                                "url": ""
+                            },
+                            "error": "Program terminated due to manual browser closure"
+                        }
+                    }
+                ]
+            }
+        finally:
+            loop.close()
