@@ -1,0 +1,27 @@
+# Core dependencies
+pydantic>=2.0.0
+
+# Async support (if not already installed)
+# asyncio is built-in, but if using additional async libraries:
+aiohttp>=3.8.0
+
+# Browser automation (common libraries - adjust based on your BrowserAgent implementation)
+# selenium>=4.0.0
+# playwright>=1.30.0
+# pyppeteer>=1.0.0
+
+# LLM service (for GeminiLLMService - adjust based on your implementation)
+# google-generativeai>=0.3.0
+# openai>=1.0.0
+
+# Database/Repository support (adjust based on your repository implementation)
+# sqlalchemy>=2.0.0
+# psycopg2-binary>=2.9.0  # PostgreSQL
+# pymongo>=4.0.0  # MongoDB
+
+# Flask (if using Flask app)
+flask>=2.3.0
+
+# Utilities
+python-dotenv>=1.0.0
+
