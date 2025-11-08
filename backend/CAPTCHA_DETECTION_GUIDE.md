@@ -296,4 +296,3 @@ The CAPTCHA detection system:
 
 This ensures that the browser agent operates ethically and respects website security measures while providing a smooth user experience when CAPTCHAs are encountered.
 
-

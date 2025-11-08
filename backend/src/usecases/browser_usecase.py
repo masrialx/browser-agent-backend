@@ -100,13 +100,22 @@ class BrowserUseCase:
                         if "CAPTCHA" not in step_desc.upper():
                             step_desc = f"Detect CAPTCHA and pause: {step_desc}"
                     
-                    # Ensure data field exists with title and url
+                    # Ensure data field exists - preserve all existing data
                     if "data" not in result:
                         result["data"] = {}
+                    
+                    # Ensure basic fields exist, but preserve all other data (like detailed_results, top_results, etc.)
                     if "title" not in result["data"]:
                         result["data"]["title"] = result.get("data", {}).get("title", "")
                     if "url" not in result["data"]:
                         result["data"]["url"] = result.get("data", {}).get("url", "")
+                    
+                    # Preserve all nested data structures (detailed_results, top_results, extraction_summary, etc.)
+                    # These are important for detailed extraction information
+                    if isinstance(result.get("data"), dict):
+                        # Keep all existing data fields - don't overwrite them
+                        pass
+                    
                     # Ensure error field exists
                     if "error" not in result:
                         result["error"] = None
@@ -116,6 +125,16 @@ class BrowserUseCase:
                     # Ensure success field exists
                     if "success" not in result:
                         result["success"] = step.get("success", False)
+                elif hasattr(result, 'dict'):
+                    # Convert TaskResult to dict if it's a Pydantic model
+                    result = result.dict()
+                    # Recursively process
+                    if "data" not in result:
+                        result["data"] = {}
+                    if "title" not in result["data"]:
+                        result["data"]["title"] = result.get("data", {}).get("title", "")
+                    if "url" not in result["data"]:
+                        result["data"]["url"] = result.get("data", {}).get("url", "")
                 
                 formatted_step = {
                     "step": step_desc,

@@ -254,4 +254,3 @@ The browser agent now:
 
 This provides a seamless experience where users only need to complete the CAPTCHA, and the agent handles the rest automatically!
 
-

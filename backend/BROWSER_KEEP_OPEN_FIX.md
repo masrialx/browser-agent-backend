@@ -165,4 +165,3 @@ To test the fix:
 
 The browser agent now **keeps the browser open** when a CAPTCHA is detected, allowing users to complete the CAPTCHA manually in the visible browser window. This provides a better user experience while maintaining security compliance.
 
-

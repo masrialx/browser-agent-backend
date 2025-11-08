@@ -242,4 +242,3 @@ The browser agent now uses **LLM-based reasoning** with:
 
 This provides a more flexible, intelligent, and maintainable system that adapts to different query types and contexts.
 
-

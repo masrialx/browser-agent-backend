@@ -1,210 +1,140 @@
 #!/usr/bin/env python3
 """
-Production-ready run script for the Browser Agent Flask API.
+Main entry point for the Browser Automation Backend Application.
 
-This script is designed for production deployment with:
-- Proper logging configuration
-- Environment variable management
-- Error handling
-- Graceful shutdown
-- Health checks
+This file serves as the main entry point to run the Flask application.
+It can be executed directly from the backend directory.
+
+Usage:
+    python run.py
+    python run.py --port 5000
+    python run.py --host 0.0.0.0 --port 5000
 """
 
 import os
 import sys
+import argparse
 import logging
-import signal
 from pathlib import Path
 
-# Add backend directory to Python path
-backend_dir = Path(__file__).parent.absolute()
-sys.path.insert(0, str(backend_dir))
+# Add current directory to Python path
+backend_dir = os.path.abspath(os.path.dirname(__file__))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
 
-# Configure logging before importing app
+# Import Flask app creation function
+from flask_app.app import create_app
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('app.log') if os.path.exists('app.log') or os.access('.', os.W_OK) else logging.StreamHandler()
+        logging.FileHandler('app.log')
     ]
 )
 
 logger = logging.getLogger(__name__)
 
-def setup_environment():
-    """Load environment variables from .env file if it exists."""
-    try:
-        from dotenv import load_dotenv
-        env_path = backend_dir / '.env'
-        if env_path.exists():
-            load_dotenv(env_path)
-            logger.info(f"Loaded environment variables from {env_path}")
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Run the Browser Automation Backend Application')
+    parser.add_argument(
+        '--host',
+        type=str,
+        default=os.getenv('HOST', '0.0.0.0'),
+        help='Host to bind to (default: 0.0.0.0)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=int(os.getenv('PORT', 5000)),
+        help='Port to bind to (default: 5000)'
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        default=os.getenv('DEBUG', 'False').lower() == 'true',
+        help='Enable debug mode'
+    )
+    parser.add_argument(
+        '--reload',
+        action='store_true',
+        help='Enable auto-reload on code changes'
+    )
+    return parser.parse_args()
+
+def main():
+    """Main function to run the Flask application."""
+    # Load environment variables
+    from dotenv import load_dotenv
+    
+    # Try to load .env from backend directory
+    env_path = Path(backend_dir) / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        logger.info(f"Loaded environment variables from {env_path}")
+    else:
+        # Try loading from flask_app directory
+        flask_app_env = Path(backend_dir) / 'flask_app' / '.env'
+        if flask_app_env.exists():
+            load_dotenv(flask_app_env)
+            logger.info(f"Loaded environment variables from {flask_app_env}")
         else:
-            logger.warning(f".env file not found at {env_path}. Using system environment variables.")
-    except ImportError:
-        logger.warning("python-dotenv not installed. Environment variables must be set manually.")
-    except Exception as e:
-        logger.error(f"Error loading environment variables: {e}")
-
-def check_required_env_vars():
-    """Check that required environment variables are set."""
-    required_vars = ['GEMINI_API_KEY']
-    missing_vars = []
+            load_dotenv()  # Try default locations
+            logger.info("Using default environment variable locations")
     
-    for var in required_vars:
-        if not os.getenv(var):
-            missing_vars.append(var)
+    # Parse command line arguments
+    args = parse_arguments()
     
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        logger.error("Please set these variables in your .env file or environment.")
-        return False
+    # Check for required environment variables
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
+        logger.warning("GEMINI_API_KEY not found in environment variables. Some features may not work.")
+        logger.warning("Please set GEMINI_API_KEY in your .env file or environment variables.")
+    else:
+        logger.info("GEMINI_API_KEY found in environment variables")
     
-    return True
-
-def create_app():
-    """Create and configure the Flask application."""
+    # Create Flask app
     try:
-        # Import after path setup
-        from flask_app.app import create_app as flask_create_app
-        app = flask_create_app()
-        return app
+        app = create_app()
+        logger.info("Flask app created successfully")
     except Exception as e:
-        logger.error(f"Error creating Flask app: {e}", exc_info=True)
-        raise
-
-def setup_signal_handlers(app):
-    """Setup signal handlers for graceful shutdown."""
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}. Shutting down gracefully...")
-        # Flask's development server handles shutdown automatically
-        sys.exit(0)
+        logger.error(f"Failed to create Flask app: {e}", exc_info=True)
+        sys.exit(1)
     
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-def run_production_server(app, host='0.0.0.0', port=5000, debug=False):
-    """Run the Flask application in production mode."""
+    # Get configuration
+    host = args.host
+    port = args.port
+    debug = args.debug or args.reload
+    
+    logger.info("=" * 60)
+    logger.info("Browser Automation Backend Application")
+    logger.info("=" * 60)
+    logger.info(f"Host: {host}")
+    logger.info(f"Port: {port}")
+    logger.info(f"Debug mode: {debug}")
+    logger.info(f"Auto-reload: {args.reload}")
+    logger.info("=" * 60)
+    logger.info(f"API Endpoint: http://{host}:{port}/api/v1/browser-agent/execute")
+    logger.info(f"Health Check: http://{host}:{port}/api/v1/browser-agent/health")
+    logger.info("=" * 60)
+    
+    # Run the application
     try:
-        logger.info("=" * 60)
-        logger.info("Starting Browser Agent Flask API Server")
-        logger.info("=" * 60)
-        logger.info(f"Host: {host}")
-        logger.info(f"Port: {port}")
-        logger.info(f"Debug Mode: {debug}")
-        logger.info(f"Environment: {os.getenv('FLASK_ENV', 'production')}")
-        logger.info("=" * 60)
-        
-        # Run the application
         app.run(
             host=host,
             port=port,
             debug=debug,
-            threaded=True,  # Enable multi-threading
-            use_reloader=False  # Disable reloader in production
+            use_reloader=args.reload
         )
     except KeyboardInterrupt:
-        logger.info("Server stopped by user")
+        logger.info("Application stopped by user")
     except Exception as e:
-        logger.error(f"Error running server: {e}", exc_info=True)
-        raise
-
-def run_with_waitress(app, host='0.0.0.0', port=5000, threads=4):
-    """Run the Flask application using Waitress WSGI server (production)."""
-    try:
-        from waitress import serve
-        logger.info("=" * 60)
-        logger.info("Starting Browser Agent Flask API Server (Waitress)")
-        logger.info("=" * 60)
-        logger.info(f"Host: {host}")
-        logger.info(f"Port: {port}")
-        logger.info(f"Threads: {threads}")
-        logger.info("=" * 60)
-        
-        serve(app, host=host, port=port, threads=threads)
-    except ImportError:
-        logger.warning("Waitress not installed. Install with: pip install waitress")
-        logger.info("Falling back to Flask development server...")
-        run_production_server(app, host=host, port=port, debug=False)
-    except Exception as e:
-        logger.error(f"Error running Waitress server: {e}", exc_info=True)
-        raise
-
-def run_with_gunicorn(app, host='0.0.0.0', port=5000, workers=4):
-    """Run the Flask application using Gunicorn WSGI server (production)."""
-    try:
-        from gunicorn.app.wsgiapp import WSGIApplication
-        
-        class StandaloneApplication(WSGIApplication):
-            def init(self, parser, opts, args):
-                self.cfg.set('bind', f'{host}:{port}')
-                self.cfg.set('workers', workers)
-                self.cfg.set('threads', 2)
-                self.cfg.set('timeout', 120)
-                self.cfg.set('access-logfile', '-')
-                self.cfg.set('error-logfile', '-')
-                self.cfg.set('log-level', 'info')
-                self.cfg.set('preload_app', True)
-                
-            def load(self):
-                return app
-        
-        logger.info("=" * 60)
-        logger.info("Starting Browser Agent Flask API Server (Gunicorn)")
-        logger.info("=" * 60)
-        logger.info(f"Host: {host}")
-        logger.info(f"Port: {port}")
-        logger.info(f"Workers: {workers}")
-        logger.info("=" * 60)
-        
-        StandaloneApplication().run()
-    except ImportError:
-        logger.warning("Gunicorn not installed. Install with: pip install gunicorn")
-        logger.info("Falling back to Flask development server...")
-        run_production_server(app, host=host, port=port, debug=False)
-    except Exception as e:
-        logger.error(f"Error running Gunicorn server: {e}", exc_info=True)
-        raise
-
-def main():
-    """Main entry point for the production server."""
-    try:
-        # Setup environment
-        setup_environment()
-        
-        # Check required environment variables
-        if not check_required_env_vars():
-            sys.exit(1)
-        
-        # Create Flask app
-        app = create_app()
-        
-        # Setup signal handlers
-        setup_signal_handlers(app)
-        
-        # Get configuration from environment
-        host = os.getenv('HOST', '0.0.0.0')
-        port = int(os.getenv('PORT', 5000))
-        debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
-        server_type = os.getenv('SERVER_TYPE', 'flask').lower()  # flask, waitress, gunicorn
-        
-        # Run the appropriate server
-        if server_type == 'waitress':
-            threads = int(os.getenv('WAITRESS_THREADS', '4'))
-            run_with_waitress(app, host=host, port=port, threads=threads)
-        elif server_type == 'gunicorn':
-            workers = int(os.getenv('GUNICORN_WORKERS', '4'))
-            run_with_gunicorn(app, host=host, port=port, workers=workers)
-        else:
-            # Default: Flask development server (not recommended for production)
-            logger.warning("Using Flask development server. For production, use SERVER_TYPE=waitress or SERVER_TYPE=gunicorn")
-            run_production_server(app, host=host, port=port, debug=debug)
-            
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"Error running application: {e}", exc_info=True)
         sys.exit(1)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
 

@@ -329,27 +329,24 @@ The browser window(s) may remain open for you to complete CAPTCHAs manually if n
                 
                 system_instruction = """You are an AI assistant that suggests fallback search strategies when primary search is blocked.
 
-IMPORTANT: DO NOT suggest Google as a fallback. Google is not allowed.
+CRITICAL RULE: Always use DuckDuckGo as the ONLY search engine for fallbacks. Never suggest Google, Bing, or blog search engines.
 
-Given a user query, suggest appropriate fallback strategies including:
-1. Alternative search engines (Bing only - NO GOOGLE) - DuckDuckGo is the default
-2. Site-specific searches on relevant authoritative sources
-3. Cached version searches
-4. For news queries: suggest news sites (bbc.com, techcrunch.com, reuters.com, cnn.com, theverge.com)
-5. For technical queries: suggest tech sites (medium.com, dev.to, stackoverflow.com, github.com)
-6. For general queries: suggest relevant authoritative sites
+Given a user query, suggest appropriate fallback strategies:
+1. Retry DuckDuckGo search (primary fallback)
+2. Site-specific searches on relevant authoritative sources (only if website is explicitly mentioned)
+3. Cached version searches (if available)
 
 Return a list of fallback strategies with:
 - type: "search_engine" | "site_search" | "cache"
-- engine: "bing" only (if type is search_engine) - DO NOT suggest Google
-- site: domain name like "bbc.com" (if type is site_search)
+- engine: "duckduckgo" ONLY (if type is search_engine) - NEVER "bing" or "google"
+- site: domain name like "bbc.com" (if type is site_search and site is mentioned in query)
 - query: the search query to use
 - description: human-readable description
 
-Always prioritize:
-1. Alternative search engines (Bing only - NO GOOGLE) - since DuckDuckGo is default
-2. Then site-specific searches on relevant authoritative sources
-3. Finally cached version searches
+Fallback priority:
+1. Retry DuckDuckGo search first
+2. Only suggest site-specific searches if the website was explicitly mentioned in the original query
+3. Do NOT suggest Google, Bing, or blog searches
 
 Return as JSON with a "fallbacks" array."""
                 
@@ -392,16 +389,12 @@ Return as JSON with a "fallbacks" array."""
                             if not fallback_dict.get("description") or not fallback_dict.get("description").strip():
                                 fallback_dict["description"] = f"Fallback: {fb_type}"
                             
-                            # Validate engine for search_engine type
+                            # Validate engine for search_engine type - ONLY DuckDuckGo allowed
                             if fb_type == "search_engine":
                                 engine = fallback_dict.get("engine", "").lower()
-                                # DO NOT allow Google - only Bing
-                                if engine == "google":
-                                    logger.warning(f"Google is not allowed as fallback, skipping")
-                                    continue
-                                if engine not in ["bing"]:
-                                    logger.warning(f"Invalid engine: {engine}, defaulting to bing")
-                                    fallback_dict["engine"] = "bing"
+                                if engine not in ["duckduckgo"]:
+                                    logger.warning(f"Invalid engine: {engine}, defaulting to duckduckgo (DuckDuckGo is the only allowed search engine)")
+                                    fallback_dict["engine"] = "duckduckgo"
                             
                             # Validate site for site_search type
                             if fb_type == "site_search":
@@ -423,47 +416,45 @@ Return as JSON with a "fallbacks" array."""
             except Exception as e:
                 logger.error(f"LLM fallback reasoning failed: {e}, using default fallbacks")
         
-        # Default fallback strategies (fallback logic)
-        # Since DuckDuckGo is default, fallback to Bing only (NO GOOGLE)
+        # Default fallback strategies (DuckDuckGo only)
         fallbacks = []
         query_lower = query.lower()
         
-        # Try Bing as fallback (NO GOOGLE)
+        # Retry DuckDuckGo search (primary fallback)
         fallbacks.append({
             "type": "search_engine",
-            "engine": "bing",
+            "engine": "duckduckgo",
             "query": query,
-            "description": f"Search Bing for {query}"
+            "description": f"Retry DuckDuckGo search for {query}"
         })
         
-        # For news queries, try news sites
-        if any(word in query_lower for word in ['news', 'latest', 'recent', 'update']):
-            news_sites = ['bbc.com', 'techcrunch.com', 'theverge.com', 'reuters.com', 'cnn.com']
-            for site in news_sites:
-                fallbacks.append({
-                    "type": "site_search",
-                    "site": site,
-                    "query": query,
-                    "description": f"Search {site} for {query}"
-                })
+        # Only add site-specific searches if the site was explicitly mentioned in the query
+        # For news queries, only if news sites are mentioned
+        mentioned_sites = []
+        news_sites = ['bbc', 'techcrunch', 'theverge', 'reuters', 'cnn']
+        for site in news_sites:
+            if site in query_lower:
+                mentioned_sites.append(f"{site}.com")
         
-        # For technical queries, try tech blogs
-        if any(word in query_lower for word in ['api', 'code', 'programming', 'developer', 'tech', 'software']):
-            tech_sites = ['medium.com', 'dev.to', 'stackoverflow.com', 'github.com']
-            for site in tech_sites:
-                fallbacks.append({
-                    "type": "site_search",
-                    "site": site,
-                    "query": query,
-                    "description": f"Search {site} for {query}"
-                })
+        # For technical queries, only if tech sites are mentioned
+        tech_sites_keywords = {
+            'medium': 'medium.com',
+            'dev.to': 'dev.to',
+            'stackoverflow': 'stackoverflow.com',
+            'github': 'github.com'
+        }
+        for keyword, site in tech_sites_keywords.items():
+            if keyword in query_lower:
+                mentioned_sites.append(site)
         
-        # Try cached version
-        fallbacks.append({
-            "type": "cache",
-            "query": query,
-            "description": f"Get cached version of results for {query}"
-        })
+        # Add site-specific searches only for mentioned sites
+        for site in mentioned_sites:
+            fallbacks.append({
+                "type": "site_search",
+                "site": site,
+                "query": query,
+                "description": f"Search {site} for {query}"
+            })
         
         return fallbacks
     
@@ -485,31 +476,62 @@ Return as JSON with a "fallbacks" array."""
                 engine = fallback.get("engine")
                 query = fallback.get("query", original_query)
                 
-                # DO NOT use Google - skip if Google is requested
-                if engine == "google":
-                    logger.warning("Google fallback requested but not allowed. Skipping.")
-                    return TaskResult(
-                        success=False,
-                        message="Google is not allowed as fallback",
-                        error="Google not allowed",
-                        data={"query": query, "fallback": fallback}
-                    )
-                elif engine == "bing":
+                if engine == "bing":
                     result = await self.SEARCH_BING(query)
-                    # Results are already included in SEARCH_BING response
+                    if result.success:
+                        read_result = await self.READ_TOP_RESULTS(limit=5)
+                        if read_result.success:
+                            result.data["top_results"] = read_result.data.get("results", [])
+                            # Extract detailed content from top 2 results
+                            detailed_results = []
+                            for i, res in enumerate(read_result.data.get("results", [])[:2]):
+                                if res.get("url"):
+                                    detail_result = await self.EXTRACT_DETAILED_CONTENT(res["url"])
+                                    if detail_result.success:
+                                        detailed_results.append(detail_result.data)
+                            result.data["detailed_results"] = detailed_results
+                    return result
+                elif engine == "duckduckgo":
+                    result = await self.SEARCH_DUCKDUCKGO(query)
+                    if result.success:
+                        read_result = await self.READ_TOP_RESULTS(limit=5)
+                        if read_result.success:
+                            result.data["top_results"] = read_result.data.get("results", [])
+                            # Extract detailed content from top 2 results
+                            detailed_results = []
+                            for i, res in enumerate(read_result.data.get("results", [])[:2]):
+                                if res.get("url") and res["url"].startswith("http"):
+                                    detail_result = await self.EXTRACT_DETAILED_CONTENT(res["url"])
+                                    if detail_result.success:
+                                        detailed_results.append(detail_result.data)
+                            result.data["detailed_results"] = detailed_results
                     return result
                     
             elif fallback_type == "site_search":
                 site = fallback.get("site")
                 query = fallback.get("query", original_query)
                 result = await self.SITE_SPECIFIC_SEARCH(site, query)
-                # Results are already included in SITE_SPECIFIC_SEARCH response
+                if result.success:
+                    read_result = await self.READ_TOP_RESULTS(limit=5)
+                    if read_result.success:
+                        result.data["top_results"] = read_result.data.get("results", [])
+                        # Extract detailed content from top 2 results
+                        detailed_results = []
+                        for i, res in enumerate(read_result.data.get("results", [])[:2]):
+                            if res.get("url") and res["url"].startswith("http"):
+                                detail_result = await self.EXTRACT_DETAILED_CONTENT(res["url"])
+                                if detail_result.success:
+                                    detailed_results.append(detail_result.data)
+                        result.data["detailed_results"] = detailed_results
                 return result
                 
             elif fallback_type == "cache":
                 query = fallback.get("query", original_query)
                 result = await self.USE_CACHE_OPERATOR(query)
-                # Results are already included in USE_CACHE_OPERATOR response
+                if result.success:
+                    read_result = await self.READ_TOP_RESULTS(limit=5)
+                    if read_result.success:
+                        result.data["top_results"] = read_result.data.get("results", [])
                 return result
                 
             return TaskResult(
@@ -527,6 +549,220 @@ Return as JSON with a "fallbacks" array."""
                 data={"fallback": fallback}
             )
     
+    def _correct_website_typos(self, query: str) -> str:
+        """
+        Correct common typos in website names.
+        
+        Args:
+            query: User query
+            
+        Returns:
+            Query with corrected website names
+        """
+        typo_corrections = {
+            # Wikipedia typos
+            'wikipida': 'wikipedia',
+            'wikipeda': 'wikipedia',
+            'wikipidia': 'wikipedia',
+            'wikepedia': 'wikipedia',
+            'wikpedia': 'wikipedia',
+            'wkipedia': 'wikipedia',
+            # Command word typos
+            'vist': 'visit',
+            'visti': 'visit',
+            'vistit': 'visit',
+            # Other website typos
+            'linkedn': 'linkedin',
+            'linkdin': 'linkedin',
+            'youtue': 'youtube',
+            'youtub': 'youtube',
+            'facebok': 'facebook',
+            'faceboook': 'facebook',
+            'redit': 'reddit',
+            'redditt': 'reddit',
+            'twiter': 'twitter',
+            'twittr': 'twitter',
+            'instgram': 'instagram',
+            'instagrm': 'instagram',
+            'githu': 'github',
+            'githb': 'github',
+            'stackoverflw': 'stackoverflow',
+            'stackoverfow': 'stackoverflow',
+        }
+        
+        corrected_query = query.lower()
+        for typo, correct in typo_corrections.items():
+            if typo in corrected_query:
+                corrected_query = corrected_query.replace(typo, correct)
+                logger.info(f"Corrected typo '{typo}' to '{correct}' in query")
+        
+        # Preserve original case for non-typo parts
+        words = query.split()
+        corrected_words = corrected_query.split()
+        if len(words) == len(corrected_words):
+            result = []
+            for orig, corr in zip(words, corrected_words):
+                if orig.lower() != corr:
+                    result.append(corr)
+                else:
+                    result.append(orig)
+            return ' '.join(result)
+        
+        return corrected_query
+    
+    async def _extract_wikipedia_search_results(self, search_terms: str) -> List[Dict]:
+        """
+        Extract Wikipedia search results and get detailed content from Wikipedia articles.
+        
+        Args:
+            search_terms: Search terms used
+            
+        Returns:
+            List of detailed results from Wikipedia articles
+        """
+        detailed_results = []
+        try:
+            # Wait for search results to load
+            await asyncio.sleep(2)
+            
+            # Extract Wikipedia search result links
+            result_links = []
+            try:
+                # Wikipedia search results are in <ul class="mw-search-results"> with <li> items containing <a> tags
+                result_items = await self.page.query_selector_all('.mw-search-results li, .searchresults li, .search-result')
+                
+                for item in result_items[:5]:  # Get top 5 results
+                    try:
+                        # Find the main article link
+                        link_elem = await item.query_selector('a[href*="/wiki/"]')
+                        if link_elem:
+                            href = await link_elem.get_attribute('href')
+                            title = await link_elem.inner_text()
+                            title = title.strip()
+                            
+                            # Construct full URL if relative
+                            if href and href.startswith('/wiki/'):
+                                href = 'https://en.wikipedia.org' + href
+                            
+                            if href and title and 'Special:' not in href:
+                                result_links.append({
+                                    "title": title,
+                                    "url": href
+                                })
+                    except Exception as e:
+                        logger.debug(f"Error extracting Wikipedia result link: {e}")
+                        continue
+                
+                # If no results found with the above selector, try alternative
+                if not result_links:
+                    # Try finding links in search results
+                    all_links = await self.page.query_selector_all('a[href*="/wiki/"]')
+                    for link in all_links[:10]:
+                        try:
+                            href = await link.get_attribute('href')
+                            title = await link.inner_text()
+                            title = title.strip()
+                            
+                            # Skip navigation and special pages
+                            if href and ('Special:' in href or 'Category:' in href or 'Help:' in href or 'Template:' in href):
+                                continue
+                            
+                            # Construct full URL if relative
+                            if href and href.startswith('/wiki/'):
+                                href = 'https://en.wikipedia.org' + href
+                            
+                            if href and title and href not in [r["url"] for r in result_links]:
+                                result_links.append({
+                                    "title": title,
+                                    "url": href
+                                })
+                                if len(result_links) >= 5:
+                                    break
+                        except:
+                            continue
+            except Exception as e:
+                logger.warning(f"Error extracting Wikipedia search result links: {e}")
+            
+            # Extract detailed content from each Wikipedia article
+            logger.info(f"Found {len(result_links)} Wikipedia articles. Extracting detailed content...")
+            for i, result_link in enumerate(result_links[:3]):  # Extract from top 3 articles
+                try:
+                    logger.info(f"Extracting content from article {i+1}/{min(3, len(result_links))}: {result_link['title']}")
+                    
+                    # Navigate to the Wikipedia article
+                    article_url = result_link['url']
+                    await self.page.goto(article_url, wait_until='domcontentloaded', timeout=30000)
+                    await asyncio.sleep(2)  # Wait for page to load
+                    
+                    # Check for CAPTCHA
+                    captcha_found = await self.DETECT_CAPTCHA()
+                    if captcha_found:
+                        logger.warning(f"CAPTCHA detected on {article_url}, skipping")
+                        continue
+                    
+                    # Extract detailed content using EXTRACT_DETAILED_CONTENT
+                    detail_result = await self.EXTRACT_DETAILED_CONTENT(article_url, max_content_length=3000)
+                    
+                    if detail_result.success:
+                        # Enhance the result with Wikipedia-specific information
+                        article_data = detail_result.data.copy()
+                        
+                        # Try to extract Wikipedia infobox data
+                        try:
+                            infobox = await self.page.evaluate("""() => {
+                                const infobox = document.querySelector('.infobox, .infobox_v2');
+                                if (!infobox) return null;
+                                const rows = Array.from(infobox.querySelectorAll('tr'));
+                                const data = {};
+                                rows.forEach(row => {
+                                    const header = row.querySelector('th');
+                                    const value = row.querySelector('td');
+                                    if (header && value) {
+                                        data[header.innerText.trim()] = value.innerText.trim();
+                                    }
+                                });
+                                return data;
+                            }""")
+                            if infobox:
+                                article_data["infobox"] = infobox
+                        except:
+                            pass
+                        
+                        # Try to extract Wikipedia table of contents
+                        try:
+                            toc = await self.page.evaluate("""() => {
+                                const toc = document.querySelector('#toc');
+                                if (!toc) return [];
+                                const links = Array.from(toc.querySelectorAll('a'));
+                                return links.map(link => link.innerText.trim()).filter(t => t);
+                            }""")
+                            if toc:
+                                article_data["table_of_contents"] = toc
+                        except:
+                            pass
+                        
+                        detailed_results.append(article_data)
+                        logger.info(f"Successfully extracted content from: {result_link['title']}")
+                    else:
+                        logger.warning(f"Failed to extract content from {result_link['title']}: {detail_result.message}")
+                except Exception as e:
+                    logger.error(f"Error extracting content from Wikipedia article {i+1}: {e}")
+                    continue
+            
+            # Navigate back to search results page if we have results
+            if detailed_results and result_links:
+                try:
+                    # Go back to search results
+                    await self.page.go_back()
+                    await asyncio.sleep(1)
+                except:
+                    pass
+            
+            return detailed_results
+        except Exception as e:
+            logger.error(f"Error extracting Wikipedia search results: {e}")
+            return detailed_results
+    
     def REASON_AND_DECIDE(self, query: str) -> ActionPlan:
         """
         Use LLM-based reasoning to decide the best action for the query.
@@ -537,37 +773,66 @@ Return as JSON with a "fallbacks" array."""
         Returns:
             ActionPlan with recommended action
         """
+        # First, correct any typos in website names
+        corrected_query = self._correct_website_typos(query)
+        if corrected_query.lower() != query.lower():
+            logger.info(f"Original query: '{query}', Corrected query: '{corrected_query}'")
+            query = corrected_query
+        
         if self.llm_service:
             try:
                 # Use LLM with structured schema for reliable parsing
                 from pydantic import BaseModel
                 
                 class ActionPlanSchema(BaseModel):
-                    action: str  # OPEN_URL, SEARCH_DUCKDUCKGO, SEARCH_GOOGLE, READ_PAGE, FIX_ISSUE
+                    action: str  # OPEN_URL, SEARCH_DUCKDUCKGO, READ_PAGE, FIX_ISSUE
                     target: str  # URL or search query
                     reason: str
                     expected_outcome: str
                 
                 system_instruction = """You are an AI assistant that analyzes user queries and determines the best browser automation action.
 
-IMPORTANT: DO NOT use Google. Only use DuckDuckGo for searches.
+CRITICAL RULES:
+1. DEFAULT SEARCH ENGINE: Always use DuckDuckGo (SEARCH_DUCKDUCKGO) as the default search engine. NEVER use Google or Bing unless explicitly requested.
+2. DIRECT SITE VISIT: If the query mentions a website by name or domain, ALWAYS use OPEN_URL to navigate directly to that website. DO NOT search for it.
+3. SEARCH INTENT: Only use search engines when NO specific website is mentioned.
 
 Analyze the user query and determine:
-1. Does the query contain a URL? If yes, extract the full URL.
-2. What is the user's intent? (search for information, open a website, read a page, fix an issue)
+1. Does the query contain a website domain name or URL? (e.g., "wikipedia", "linkedin", "youtube", "github.com", "open facebook", "visit reddit")
+   - If a website is mentioned: use OPEN_URL to navigate DIRECTLY to that website
+   - Common websites: wikipedia, linkedin, facebook, youtube, github, reddit, twitter, instagram, stackoverflow, etc.
+2. What is the user's intent? 
+   - If website/domain mentioned: user wants to OPEN_URL to that website (e.g., "go to LinkedIn" -> OPEN_URL("https://www.linkedin.com"))
+   - If website mentioned WITH search query (e.g., "find X on wikipedia"): OPEN_URL to website first, then search within that website
+   - If NO website mentioned: user wants to SEARCH_DUCKDUCKGO for information (NOT Google or Bing)
 3. What action should be taken? Choose one of: OPEN_URL, SEARCH_DUCKDUCKGO, READ_PAGE, FIX_ISSUE
-4. What are the search terms if it's a search query? (extract key terms, remove command words like "search", "find", "look for")
-5. What is the expected outcome?
+4. If OPEN_URL: construct the full URL from the domain name
+   - Examples: "linkedin" -> "https://www.linkedin.com", "youtube" -> "https://www.youtube.com"
+5. If SEARCH_DUCKDUCKGO: extract search terms (remove command words like "search", "find", "look for")
 
-Rules:
-- If URL is present: action = "OPEN_URL", target = the URL
-- If search intent: action = "SEARCH_DUCKDUCKGO", target = cleaned search terms (remove "search for", "find", etc.)
-- DEFAULT: Use DuckDuckGo as the ONLY search engine - DO NOT use Google
-- DO NOT suggest SEARCH_GOOGLE - it is not allowed
-- If information request without URL: action = "SEARCH_DUCKDUCKGO", target = the query terms
-- Be smart about extracting search terms - remove filler words but keep the core meaning
+EXAMPLES:
+- "Go to LinkedIn" -> OPEN_URL("https://www.linkedin.com")
+- "Visit Facebook" -> OPEN_URL("https://www.facebook.com")
+- "Open YouTube" -> OPEN_URL("https://www.youtube.com")
+- "Go to github.com" -> OPEN_URL("https://www.github.com")
+- "visit wikipedia and find about X" -> OPEN_URL("https://www.wikipedia.org") (then search within Wikipedia)
+- "vist wikipida and find about X" -> OPEN_URL("https://www.wikipedia.org") (typos are automatically corrected)
+- "find about Ethiopian and sumz on wikipedia" -> OPEN_URL("https://www.wikipedia.org")
+- "search latest news about AI" (no website) -> SEARCH_DUCKDUCKGO("latest news about AI")
+- "find latest OpenAI updates" (no website) -> SEARCH_DUCKDUCKGO("latest OpenAI updates")
 
-Return your analysis as JSON with: action, target, reason, expected_outcome"""
+Website domain mapping:
+- linkedin / linkedin.com -> https://www.linkedin.com
+- facebook / facebook.com -> https://www.facebook.com
+- youtube / youtube.com -> https://www.youtube.com
+- github / github.com -> https://www.github.com
+- wikipedia / wikipedia.org -> https://www.wikipedia.org
+- reddit / reddit.com -> https://www.reddit.com
+- twitter / twitter.com -> https://www.twitter.com
+- instagram / instagram.com -> https://www.instagram.com
+- stackoverflow / stackoverflow.com -> https://www.stackoverflow.com
+
+Return your analysis as JSON with: action, target (URL or search query), reason, expected_outcome"""
                 
                 reasoning_prompt = f"""
                 User Query: "{query}"
@@ -585,14 +850,15 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     
                     # Validate the response
                     if hasattr(response, 'action') and hasattr(response, 'target'):
-                        # Validate action is one of the allowed values (NO GOOGLE)
-                        allowed_actions = ["OPEN_URL", "SEARCH_DUCKDUCKGO", "READ_PAGE", "FIX_ISSUE"]
+                        # Validate action is one of the allowed values
+                        allowed_actions = ["OPEN_URL", "SEARCH_GOOGLE", "SEARCH_DUCKDUCKGO", "READ_PAGE", "FIX_ISSUE"]
                         if response.action not in allowed_actions:
                             logger.warning(f"Invalid action from LLM: {response.action}, defaulting to SEARCH_DUCKDUCKGO")
                             response.action = "SEARCH_DUCKDUCKGO"
-                        # DO NOT allow SEARCH_GOOGLE - convert to SEARCH_DUCKDUCKGO
+                        
+                        # Map SEARCH_GOOGLE to SEARCH_DUCKDUCKGO (DuckDuckGo is default)
                         if response.action == "SEARCH_GOOGLE":
-                            logger.warning("LLM suggested Google, but Google is not allowed. Converting to DuckDuckGo.")
+                            logger.info("Mapping SEARCH_GOOGLE to SEARCH_DUCKDUCKGO (DuckDuckGo is default search engine)")
                             response.action = "SEARCH_DUCKDUCKGO"
                         
                         # Ensure target is not empty
@@ -615,8 +881,65 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             except Exception as e:
                 logger.error(f"LLM reasoning failed: {e}, using fallback logic")
         
-        # Fallback logic without LLM (simple regex-based)
+        # Fallback logic without LLM (enhanced domain detection with typo tolerance)
         query_lower = query.lower()
+        
+        # Common website domains to detect (with common typos)
+        website_domains = {
+            'linkedin': 'https://www.linkedin.com',
+            'linkdin': 'https://www.linkedin.com',
+            'linkedn': 'https://www.linkedin.com',
+            'facebook': 'https://www.facebook.com',
+            'facebok': 'https://www.facebook.com',
+            'youtube': 'https://www.youtube.com',
+            'youtue': 'https://www.youtube.com',
+            'youtub': 'https://www.youtube.com',
+            'github': 'https://www.github.com',
+            'githu': 'https://www.github.com',
+            'githb': 'https://www.github.com',
+            'wikipedia': 'https://www.wikipedia.org',
+            'wikipida': 'https://www.wikipedia.org',
+            'wikipeda': 'https://www.wikipedia.org',
+            'wikipidia': 'https://www.wikipedia.org',
+            'wikepedia': 'https://www.wikipedia.org',
+            'wikpedia': 'https://www.wikipedia.org',
+            'wkipedia': 'https://www.wikipedia.org',
+            'reddit': 'https://www.reddit.com',
+            'redit': 'https://www.reddit.com',
+            'redditt': 'https://www.reddit.com',
+            'twitter': 'https://www.twitter.com',
+            'twiter': 'https://www.twitter.com',
+            'twittr': 'https://www.twitter.com',
+            'instagram': 'https://www.instagram.com',
+            'instgram': 'https://www.instagram.com',
+            'instagrm': 'https://www.instagram.com',
+            'stackoverflow': 'https://www.stackoverflow.com',
+            'stackoverflw': 'https://www.stackoverflow.com',
+            'stackoverfow': 'https://www.stackoverflow.com',
+            'medium': 'https://www.medium.com',
+            'dev.to': 'https://www.dev.to',
+            'techcrunch': 'https://www.techcrunch.com',
+            'bbc': 'https://www.bbc.com',
+            'cnn': 'https://www.cnn.com',
+            'reuters': 'https://www.reuters.com',
+            'theverge': 'https://www.theverge.com',
+            'arstechnica': 'https://www.arstechnica.com',
+        }
+        
+        # Check if query mentions a website domain (with typo tolerance)
+        for domain, url in website_domains.items():
+            if domain in query_lower:
+                # Check for context words that indicate navigation intent
+                nav_keywords = ['on ', 'from ', 'visit', 'open', 'go to', 'navigate to', 'check', 'read', 'find on', 'search on', 'go', 'visit', 'vist']
+                # Also check if domain appears as a word (handles "visit wikipedia", "wikipedia page", etc.)
+                if any(keyword + domain in query_lower or domain + ' ' in query_lower or ' ' + domain in query_lower for keyword in nav_keywords) or domain in query_lower.split():
+                    logger.info(f"Website domain '{domain}' detected in query. Navigating directly to {url}")
+                    return ActionPlan(
+                        action="OPEN_URL",
+                        target=url,
+                        reason=f"Website domain '{domain}' detected in query - navigating directly to website",
+                        expected_outcome=f"Navigate to {domain} website"
+                    )
         
         # Check for URL (basic pattern matching)
         url_pattern = r'https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}'
@@ -632,11 +955,11 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                 expected_outcome="Navigate to the specified website"
             )
         
-        # Default: search DuckDuckGo (fallback)
+        # Default: search DuckDuckGo (NOT Google)
         return ActionPlan(
             action="SEARCH_DUCKDUCKGO",
             target=query,
-            reason="No specific URL provided, using DuckDuckGo search (default search engine)",
+            reason="No specific URL or website domain provided, using DuckDuckGo search (default search engine)",
             expected_outcome="Find relevant information"
         )
     
@@ -659,7 +982,13 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Opening URL: {url}")
             await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(3)  # Wait for page to fully load (increased delay for stability)
+            # Wait for network to be idle to ensure page is fully loaded
+            try:
+                await self.page.wait_for_load_state('networkidle', timeout=10000)
+            except:
+                pass
+            await asyncio.sleep(1)  # Additional delay for stability
             
             # Check for CAPTCHA immediately after page load
             captcha_found = await self.DETECT_CAPTCHA()
@@ -741,10 +1070,9 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Searching Bing for: {query}")
             
-            # Navigate to Bing and wait for full load
-            logger.info("Navigating to Bing...")
+            # Navigate to Bing
             await self.page.goto("https://www.bing.com", wait_until='domcontentloaded', timeout=30000)
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(1)
             
             # Check for CAPTCHA
             captcha_found = await self.DETECT_CAPTCHA()
@@ -764,41 +1092,31 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     }
                 )
             
-            # Find search box - try multiple selectors with proper waiting
-            logger.info("Waiting for Bing search box to be ready...")
+            # Find search box
             search_selectors = ['input[name="q"]', 'input[type="search"]', '#sb_form_q']
             search_box = None
-            
             for selector in search_selectors:
-                search_box = await self.WAIT_FOR_ELEMENT_READY(selector, timeout=5000, max_retries=3)
-                if search_box:
-                    logger.info(f"Found Bing search box using selector: {selector}")
-                    break
+                try:
+                    search_box = await self.page.query_selector(selector)
+                    if search_box:
+                        break
+                except:
+                    continue
             
             if not search_box:
                 return TaskResult(
                     success=False,
-                    message="Could not find Bing search box after multiple attempts",
+                    message="Could not find Bing search box",
                     error="Search box element not found",
                     data={"query": query, "search_engine": "bing"}
                 )
             
-            # Type search query - clear first, then type
-            logger.info(f"Typing search query: {query}")
-            await search_box.click()  # Focus on the element
-            await asyncio.sleep(0.3)
-            await search_box.fill('')  # Clear any existing text
-            await asyncio.sleep(0.2)
-            await search_box.type(query, delay=50)  # Type with delay for reliability
+            # Type search query
+            await search_box.fill(query)
             await asyncio.sleep(0.5)
-            
-            # Submit search
-            logger.info("Submitting search...")
             await search_box.press("Enter")
-            
-            # Wait for search results page to load
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
-            await asyncio.sleep(2)  # Additional wait for results to render
+            await self.page.wait_for_load_state('networkidle', timeout=10000)
+            await asyncio.sleep(2)
             
             # Check for CAPTCHA on results page
             captcha_found = await self.DETECT_CAPTCHA()
@@ -821,9 +1139,19 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             title = await self.page.title()
             current_url = self.page.url
             
-            # Extract search results using READ_TOP_RESULTS
-            read_result = await self.READ_TOP_RESULTS(limit=5)
-            results = read_result.data.get("results", []) if read_result.success else []
+            # Extract search results
+            results = []
+            try:
+                result_elements = await self.page.query_selector_all('h2 a, .b_title a')
+                for i, elem in enumerate(result_elements[:5]):
+                    try:
+                        text = await elem.inner_text()
+                        link = await elem.get_attribute('href')
+                        results.append({"title": text, "url": link})
+                    except:
+                        continue
+            except:
+                pass
             
             return TaskResult(
                 success=True,
@@ -833,7 +1161,6 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     "url": current_url,
                     "query": query,
                     "results": results,
-                    "results_count": len(results),
                     "search_engine": "bing"
                 }
             )
@@ -861,10 +1188,9 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Searching DuckDuckGo for: {query}")
             
-            # Navigate to DuckDuckGo and wait for full load
-            logger.info("Navigating to DuckDuckGo (default search engine)...")
+            # Navigate to DuckDuckGo
             await self.page.goto("https://www.duckduckgo.com", wait_until='domcontentloaded', timeout=30000)
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(1)
             
             # Check for CAPTCHA
             captcha_found = await self.DETECT_CAPTCHA()
@@ -884,41 +1210,37 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     }
                 )
             
-            # Find search box - wait for it to be visible, enabled, and interactive
-            logger.info("Waiting for DuckDuckGo search box to be ready...")
+            # Find search box
             search_selectors = ['input[name="q"]', 'input[type="search"]', '#search_form_input_homepage']
             search_box = None
-            
             for selector in search_selectors:
-                search_box = await self.WAIT_FOR_ELEMENT_READY(selector, timeout=10000, max_retries=5)
-                if search_box:
-                    logger.info(f"Found DuckDuckGo search box using selector: {selector}")
-                    break
+                try:
+                    search_box = await self.page.query_selector(selector)
+                    if search_box:
+                        break
+                except:
+                    continue
             
             if not search_box:
                 return TaskResult(
                     success=False,
-                    message="Could not find DuckDuckGo search box after multiple attempts",
+                    message="Could not find DuckDuckGo search box",
                     error="Search box element not found",
                     data={"query": query, "search_engine": "duckduckgo"}
                 )
             
-            # Type search query - clear first, then type
-            logger.info(f"Typing search query: {query}")
-            await search_box.click()  # Focus on the element
-            await asyncio.sleep(0.3)
-            await search_box.fill('')  # Clear any existing text
-            await asyncio.sleep(0.2)
-            await search_box.type(query, delay=50)  # Type with delay for reliability
+            # Type search query
+            await search_box.fill(query)
             await asyncio.sleep(0.5)
-            
-            # Submit search
-            logger.info("Submitting search...")
             await search_box.press("Enter")
-            
-            # Wait for search results page to load
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
-            await asyncio.sleep(2)  # Additional wait for results to render
+            # Wait for navigation to start
+            await asyncio.sleep(1)
+            # Wait for page load (use domcontentloaded instead of networkidle for better reliability)
+            try:
+                await self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+            except Exception as e:
+                logger.warning(f"Timeout waiting for domcontentloaded: {e}")
+            await asyncio.sleep(2)  # Additional wait for content to render
             
             # Check for CAPTCHA on results page
             captcha_found = await self.DETECT_CAPTCHA()
@@ -941,9 +1263,62 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             title = await self.page.title()
             current_url = self.page.url
             
-            # Extract search results using READ_TOP_RESULTS
-            read_result = await self.READ_TOP_RESULTS(limit=5)
-            results = read_result.data.get("results", []) if read_result.success else []
+            # Extract search results with snippets
+            results = []
+            try:
+                # DuckDuckGo uses article[data-testid="result"]
+                result_elements = await self.page.query_selector_all('article[data-testid="result"], .result, .web-result')
+                for i, elem in enumerate(result_elements[:5]):
+                    try:
+                        # Get title and link
+                        title_elem = await elem.query_selector('h2 a[data-testid="result-title-a"], h2 a, a[data-testid="result-title-a"]')
+                        if title_elem:
+                            text = await title_elem.inner_text()
+                            text = text.strip()
+                            link = await title_elem.get_attribute('href')
+                            
+                            # Handle DuckDuckGo redirect URLs (/l/?kh=-1&uddg=...)
+                            if link and link.startswith('/l/'):
+                                # Extract the actual URL from the redirect
+                                try:
+                                    # Get the data-uddg attribute or extract from href
+                                    if 'uddg=' in link:
+                                        actual_url = link.split('uddg=')[1].split('&')[0]
+                                        link = actual_url
+                                except:
+                                    pass
+                            
+                            # Handle relative URLs
+                            if link and not link.startswith('http'):
+                                if link.startswith('/'):
+                                    base_url = "https://" + current_url.split('/')[2] if len(current_url.split('/')) > 2 else "https://duckduckgo.com"
+                                    link = base_url + link
+                                else:
+                                    link = "https://" + link
+                            
+                            # Get snippet
+                            snippet = ""
+                            try:
+                                snippet_elem = await elem.query_selector('span[data-testid="result-snippet"], .result__snippet, .snippet')
+                                if snippet_elem:
+                                    snippet = await snippet_elem.inner_text()
+                                    snippet = snippet.strip()[:200]
+                            except:
+                                pass
+                            
+                            if text and link:
+                                results.append({
+                                    "title": text,
+                                    "url": link,
+                                    "snippet": snippet,
+                                    "rank": i + 1
+                                })
+                    except Exception as e:
+                        logger.debug(f"Error extracting DuckDuckGo result {i}: {e}")
+                        continue
+            except Exception as e:
+                logger.warning(f"Error extracting DuckDuckGo results: {e}")
+                pass
             
             return TaskResult(
                 success=True,
@@ -953,7 +1328,6 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     "url": current_url,
                     "query": query,
                     "results": results,
-                    "results_count": len(results),
                     "search_engine": "duckduckgo"
                 }
             )
@@ -968,8 +1342,7 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
     
     async def SITE_SPECIFIC_SEARCH(self, site: str, query: str) -> TaskResult:
         """
-        Perform a site-specific search using DuckDuckGo's site: operator.
-        NO GOOGLE - only use DuckDuckGo or Bing.
+        Perform a site-specific search using Google's site: operator.
         
         Args:
             site: Site domain (e.g., "bbc.com", "techcrunch.com")
@@ -982,13 +1355,13 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             site_query = f"site:{site} {query}"
             logger.info(f"Performing site-specific search: {site_query}")
             
-            # Try with DuckDuckGo first (NO GOOGLE)
-            result = await self.SEARCH_DUCKDUCKGO(site_query)
-            if result.success and result.error != "CAPTCHA_DETECTED":
+            # Try with Google first, but if CAPTCHA, try Bing
+            result = await self.SEARCH_GOOGLE(site_query)
+            if result.error != "CAPTCHA_DETECTED":
                 return result
             
-            # If DuckDuckGo has CAPTCHA or fails, try Bing (NO GOOGLE)
-            logger.info(f"DuckDuckGo blocked, trying Bing for site search: {site_query}")
+            # If Google has CAPTCHA, try Bing
+            logger.info(f"Google blocked, trying Bing for site search: {site_query}")
             return await self.SEARCH_BING(site_query)
         except Exception as e:
             logger.error(f"Error in site-specific search: {e}")
@@ -1001,7 +1374,7 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
     
     async def USE_CACHE_OPERATOR(self, query: str) -> TaskResult:
         """
-        Try to get cached version using cache: operator.
+        Try to get cached version using DuckDuckGo cache.
         
         Args:
             query: Original query
@@ -1010,18 +1383,9 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             TaskResult with cached results
         """
         try:
-            cache_query = f"cache:{query}"
-            logger.info(f"Trying cached version: {cache_query}")
-            
-            # Try with Google cache operator
-            result = await self.SEARCH_GOOGLE(cache_query)
-            if result.error != "CAPTCHA_DETECTED":
-                return result
-            
-            # If blocked, try webcache
-            webcache_query = f"webcache:{query}"
-            logger.info(f"Trying webcache: {webcache_query}")
-            return await self.SEARCH_BING(webcache_query)
+            # DuckDuckGo doesn't have a cache operator, so we'll just retry the search
+            logger.info(f"Cache operator not available for DuckDuckGo. Retrying search: {query}")
+            return await self.SEARCH_DUCKDUCKGO(query)
         except Exception as e:
             logger.error(f"Error getting cached version: {e}")
             return TaskResult(
@@ -1033,14 +1397,13 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
     
     async def READ_TOP_RESULTS(self, limit: int = 5) -> TaskResult:
         """
-        Read the top search results from the current page.
-        Extracts detailed information including titles, URLs, and snippets.
+        Read the top search results from the current page and extract detailed information.
         
         Args:
             limit: Number of results to read
             
         Returns:
-            TaskResult with top results
+            TaskResult with top results and detailed content
         """
         try:
             if not self.page:
@@ -1056,185 +1419,68 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             # Extract results based on current search engine
             results = []
             
+            # Try to extract results (works for Google, Bing, DuckDuckGo)
             try:
-                # Wait for results to load
-                await asyncio.sleep(2)
+                # DuckDuckGo style
+                result_elements = await self.page.query_selector_all('article[data-testid="result"], .result, .web-result, h2 a[data-testid="result-title-a"]')
+                if not result_elements:
+                    # Google style
+                    result_elements = await self.page.query_selector_all('div[data-header-feature="0"] h3, div.g h3, div.g a h3')
+                if not result_elements:
+                    # Bing style
+                    result_elements = await self.page.query_selector_all('h2 a, .b_title a, .b_algo')
                 
-                # Try multiple selectors for different search engines
-                # Google
-                google_selectors = [
-                    'div[data-header-feature="0"] h3',
-                    'div.g h3',
-                    'div[data-sokoban-container] h3',
-                    '.yuRUbf h3',
-                    'h3.LC20lb'
-                ]
-                
-                # Bing
-                bing_selectors = [
-                    'h2 a',
-                    '.b_title a',
-                    '.b_algo h2 a',
-                    'li.b_algo h2 a'
-                ]
-                
-                # DuckDuckGo
-                ddg_selectors = [
-                    'h2 a.result__a',
-                    '.result__title a',
-                    'a.result__a',
-                    '.web-result h2 a'
-                ]
-                
-                all_selectors = google_selectors + bing_selectors + ddg_selectors
-                
-                for selector in all_selectors:
+                for i, elem in enumerate(result_elements[:limit]):
                     try:
-                        result_elements = await self.page.query_selector_all(selector)
-                        if result_elements:
-                            logger.info(f"Found {len(result_elements)} results using selector: {selector}")
-                            for i, elem in enumerate(result_elements[:limit]):
-                                try:
-                                    # Get title
-                                    title_text = await elem.inner_text()
-                                    if not title_text or len(title_text.strip()) < 3:
-                                        continue
-                                    
-                                    # Get link - try multiple methods
-                                    link = None
-                                    
-                                    # Method 1: Check if element itself is a link
-                                    try:
-                                        if await elem.evaluate('(el) => el.tagName === "A"'):
-                                            link = await elem.get_attribute('href')
-                                    except:
-                                        pass
-                                    
-                                    # Method 2: Find link in parent or child
-                                    if not link:
-                                        try:
-                                            link_elem = await elem.query_selector('a')
-                                            if link_elem:
-                                                link = await link_elem.get_attribute('href')
-                                        except:
-                                            pass
-                                    
-                                    # Method 3: Find parent link using JavaScript
-                                    if not link:
-                                        try:
-                                            link = await elem.evaluate("""(elem) => {
-                                                const link = elem.closest('a');
-                                                return link ? link.href : null;
-                                            }""")
-                                        except:
-                                            pass
-                                    
-                                    # Method 4: Try finding nearby link
-                                    if not link:
-                                        try:
-                                            parent_container = await elem.evaluate_handle('(elem) => elem.closest("div, li, article")')
-                                            if parent_container:
-                                                link_elem = await parent_container.query_selector('a[href]')
-                                                if link_elem:
-                                                    link = await link_elem.get_attribute('href')
-                                        except:
-                                            pass
-                                    
-                                    # Clean and validate URL
-                                    if link:
-                                        # Remove URL parameters for DuckDuckGo redirects
-                                        if 'duckduckgo.com' in current_url and 'uddg=' in link:
-                                            # Extract actual URL from DuckDuckGo redirect
-                                            import urllib.parse
-                                            try:
-                                                parsed = urllib.parse.urlparse(link)
-                                                params = urllib.parse.parse_qs(parsed.query)
-                                                if 'uddg' in params:
-                                                    link = params['uddg'][0]
-                                            except:
-                                                pass
-                                        
-                                        # Handle relative URLs
-                                        if link.startswith('/'):
-                                            if 'google.com' in current_url:
-                                                link = f"https://www.google.com{link}"
-                                            elif 'bing.com' in current_url:
-                                                link = f"https://www.bing.com{link}"
-                                        
-                                        # Validate URL
-                                        if not link.startswith('http') and not link.startswith('//'):
-                                            # Skip invalid URLs
-                                            continue
-                                        
-                                        # Normalize URL
-                                        if link.startswith('//'):
-                                            link = 'https:' + link
-                                    
-                                    # Get snippet/description if available
-                                    snippet = ""
-                                    try:
-                                        # Try to find snippet near the result
-                                        result_container = await elem.evaluate_handle('(elem) => elem.closest("div[class*="result"], div[class*="g"], li")')
-                                        if result_container:
-                                            snippet_elem = await result_container.query_selector('.VwiC3b, .b_caption p, .result__snippet, .s')
-                                            if snippet_elem:
-                                                snippet = await snippet_elem.inner_text()
-                                                snippet = snippet[:200]  # Limit snippet length
-                                    except:
-                                        pass
-                                    
-                                    if title_text and link:
-                                        results.append({
-                                            "title": title_text.strip(),
-                                            "url": link,
-                                            "snippet": snippet.strip() if snippet else ""
-                                        })
-                                    
-                                    # Break if we have enough results
-                                    if len(results) >= limit:
-                                        break
-                                except Exception as e:
-                                    logger.debug(f"Error extracting individual result: {e}")
-                                    continue
-                            
-                            # If we found results, break
-                            if results:
-                                break
+                        # Get title
+                        title_elem = elem if elem.tag_name in ['H2', 'H3', 'A'] else await elem.query_selector('h2, h3, a')
+                        if not title_elem:
+                            title_elem = elem
+                        
+                        text = await title_elem.inner_text()
+                        text = text.strip()
+                        
+                        # Get link
+                        link_elem = await elem.query_selector('a') if elem.tag_name != 'A' else elem
+                        if not link_elem and title_elem.tag_name == 'A':
+                            link_elem = title_elem
+                        
+                        if link_elem:
+                            link = await link_elem.get_attribute('href')
+                            # Handle relative URLs
+                            if link and not link.startswith('http'):
+                                if link.startswith('/'):
+                                    # Try to construct full URL
+                                    base_url = current_url.split('/')[0] + '//' + current_url.split('/')[2]
+                                    link = base_url + link
+                                else:
+                                    link = current_url + '/' + link
+                        else:
+                            link = None
+                        
+                        # Get snippet/description if available
+                        snippet = ""
+                        try:
+                            # Try to find snippet/description
+                            snippet_elem = await elem.query_selector('.result__snippet, .b_caption p, .VwiC3b, span[data-testid="result-snippet"]')
+                            if snippet_elem:
+                                snippet = await snippet_elem.inner_text()
+                                snippet = snippet.strip()[:200]  # Limit snippet length
+                        except:
+                            pass
+                        
+                        if text and link:
+                            results.append({
+                                "title": text,
+                                "url": link,
+                                "snippet": snippet,
+                                "rank": i + 1
+                            })
                     except Exception as e:
-                        logger.debug(f"Error with selector {selector}: {e}")
+                        logger.debug(f"Error extracting result {i}: {e}")
                         continue
-                
-                # If still no results, try a more aggressive approach
-                if not results:
-                    logger.warning("Standard selectors failed, trying alternative extraction")
-                    try:
-                        # Get all links on the page
-                        all_links = await self.page.query_selector_all('a[href]')
-                        for link_elem in all_links[:limit * 3]:  # Check more links
-                            try:
-                                href = await link_elem.get_attribute('href')
-                                if href and ('http' in href or href.startswith('/')):
-                                    title_text = await link_elem.inner_text()
-                                    if title_text and len(title_text.strip()) > 10:
-                                        # Filter out navigation links
-                                        if any(skip in href.lower() for skip in ['/search', '/images', '/maps', '/settings', '/preferences']):
-                                            continue
-                                        results.append({
-                                            "title": title_text.strip()[:100],
-                                            "url": href,
-                                            "snippet": ""
-                                        })
-                                        if len(results) >= limit:
-                                            break
-                            except:
-                                continue
-                    except Exception as e:
-                        logger.warning(f"Alternative extraction also failed: {e}")
-                
             except Exception as e:
-                logger.error(f"Error extracting results: {e}", exc_info=True)
-            
-            logger.info(f"Extracted {len(results)} results from {current_url}")
+                logger.warning(f"Error extracting results: {e}")
             
             return TaskResult(
                 success=True,
@@ -1247,11 +1493,192 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                 }
             )
         except Exception as e:
-            logger.error(f"Error reading top results: {e}", exc_info=True)
+            logger.error(f"Error reading top results: {e}")
             return TaskResult(
                 success=False,
                 message="Failed to read top results",
                 error=str(e)
+            )
+    
+    async def EXTRACT_DETAILED_CONTENT(self, url: str, max_content_length: int = 2000) -> TaskResult:
+        """
+        Extract detailed content from a specific URL.
+        
+        Args:
+            url: URL to extract content from
+            max_content_length: Maximum content length to extract
+            
+        Returns:
+            TaskResult with detailed content
+        """
+        try:
+            if not self.page:
+                await self.initialize_browser()
+            
+            logger.info(f"Extracting detailed content from: {url}")
+            
+            # Navigate to the URL
+            await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(3)  # Wait for page to load (increased delay for stability)
+            # Wait for network to be idle to ensure page is fully loaded
+            try:
+                await self.page.wait_for_load_state('networkidle', timeout=10000)
+            except:
+                pass
+            await asyncio.sleep(1)  # Additional delay for stability
+            
+            # Check for CAPTCHA
+            captcha_found = await self.DETECT_CAPTCHA()
+            if captcha_found:
+                return TaskResult(
+                    success=False,
+                    message=f"CAPTCHA detected on {url}",
+                    error="CAPTCHA_DETECTED",
+                    data={"url": url}
+                )
+            
+            title = await self.page.title()
+            current_url = self.page.url
+            
+            # Extract detailed content
+            try:
+                # Get main content
+                body_text = await self.page.evaluate('() => document.body.innerText')
+                
+                # Get article content (try common article selectors)
+                article_content = ""
+                article_selectors = [
+                    'article',
+                    '[role="article"]',
+                    '.article-content',
+                    '.post-content',
+                    '.entry-content',
+                    'main article',
+                    '.content',
+                    '#content'
+                ]
+                
+                for selector in article_selectors:
+                    try:
+                        article_elem = await self.page.query_selector(selector)
+                        if article_elem:
+                            article_content = await article_elem.inner_text()
+                            if len(article_content) > 100:  # Only use if substantial content
+                                break
+                    except:
+                        continue
+                
+                # Use article content if available, otherwise use body text
+                main_content = article_content if article_content else body_text
+                
+                # Limit content length
+                if len(main_content) > max_content_length:
+                    main_content = main_content[:max_content_length] + "..."
+                
+                # Get meta description
+                meta_desc = await self.page.evaluate("""() => {
+                    const meta = document.querySelector('meta[name="description"]');
+                    return meta ? meta.content : "";
+                }""")
+                
+                # Get headings
+                headings = await self.page.evaluate("""() => {
+                    const h1s = Array.from(document.querySelectorAll("h1")).map(h => h.innerText).filter(t => t.trim());
+                    const h2s = Array.from(document.querySelectorAll("h2")).map(h => h.innerText).filter(t => t.trim());
+                    const h3s = Array.from(document.querySelectorAll("h3")).map(h => h.innerText).filter(t => t.trim());
+                    return {h1: h1s, h2: h2s, h3: h3s};
+                }""")
+                
+                # Get publication date if available
+                pub_date = ""
+                date_selectors = [
+                    'time[datetime]',
+                    '[class*="date"]',
+                    '[class*="published"]',
+                    'time'
+                ]
+                for selector in date_selectors:
+                    try:
+                        date_elem = await self.page.query_selector(selector)
+                        if date_elem:
+                            pub_date = await date_elem.get_attribute('datetime') or await date_elem.inner_text()
+                            if pub_date:
+                                break
+                    except:
+                        continue
+                
+                # Get author if available
+                author = ""
+                author_selectors = [
+                    '[rel="author"]',
+                    '[class*="author"]',
+                    '.byline',
+                    '[itemprop="author"]'
+                ]
+                for selector in author_selectors:
+                    try:
+                        author_elem = await self.page.query_selector(selector)
+                        if author_elem:
+                            author = await author_elem.inner_text()
+                            if author:
+                                break
+                    except:
+                        continue
+                
+                # Extract key information using LLM if available
+                key_points = []
+                if self.llm_service and main_content:
+                    try:
+                        summary_prompt = f"""Extract the key points and main information from this article content:
+
+Title: {title}
+Content: {main_content[:1500]}
+
+Provide 3-5 key points or important facts from this content. Return as a JSON array of strings."""
+                        
+                        summary = self.llm_service.generate_content(summary_prompt)
+                        # Try to extract array from response
+                        import json
+                        json_match = re.search(r'\[.*?\]', summary, re.DOTALL)
+                        if json_match:
+                            key_points = json.loads(json_match.group())
+                        else:
+                            # Fallback: split by lines or sentences
+                            key_points = [s.strip() for s in summary.split('\n') if s.strip()][:5]
+                    except Exception as e:
+                        logger.debug(f"Error extracting key points: {e}")
+                
+                return TaskResult(
+                    success=True,
+                    message=f"Successfully extracted content from {title}",
+                    data={
+                        "title": title,
+                        "url": current_url,
+                        "content": main_content,
+                        "content_preview": main_content[:500] if main_content else "",
+                        "meta_description": meta_desc,
+                        "headings": headings,
+                        "publication_date": pub_date,
+                        "author": author,
+                        "key_points": key_points,
+                        "content_length": len(main_content)
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Error extracting detailed content: {e}")
+                return TaskResult(
+                    success=False,
+                    message=f"Failed to extract content from {url}",
+                    error=str(e),
+                    data={"url": url}
+                )
+        except Exception as e:
+            logger.error(f"Error navigating to URL {url}: {e}")
+            return TaskResult(
+                success=False,
+                message=f"Failed to navigate to {url}",
+                error=str(e),
+                data={"url": url}
             )
     
     async def SEARCH_GOOGLE(self, query: str) -> TaskResult:
@@ -1269,10 +1696,9 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             logger.info(f"Searching Google for: {query}")
             
-            # Navigate to Google and wait for full load
-            logger.info("Navigating to Google...")
+            # Navigate to Google
             await self.page.goto("https://www.google.com", wait_until='domcontentloaded', timeout=30000)
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
+            await asyncio.sleep(1)
             
             # Check for CAPTCHA on Google homepage
             captcha_found = await self.DETECT_CAPTCHA()
@@ -1300,8 +1726,7 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     }
                 )
             
-            # Find search box - wait for it to be visible, enabled, and interactive
-            logger.info("Waiting for Google search box to be ready...")
+            # Find search box - try multiple selectors
             search_selectors = [
                 'textarea[name="q"]',
                 'input[name="q"]',
@@ -1311,35 +1736,29 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             
             search_box = None
             for selector in search_selectors:
-                search_box = await self.WAIT_FOR_ELEMENT_READY(selector, timeout=5000, max_retries=3)
-                if search_box:
-                    logger.info(f"Found Google search box using selector: {selector}")
-                    break
+                try:
+                    search_box = await self.page.query_selector(selector)
+                    if search_box:
+                        break
+                except:
+                    continue
             
             if not search_box:
                 return TaskResult(
                     success=False,
-                    message="Could not find Google search box after multiple attempts",
+                    message="Could not find Google search box",
                     error="Search box element not found",
                     data={"query": query}
                 )
             
-            # Type search query - clear first, then type
-            logger.info(f"Typing search query: {query}")
-            await search_box.click()  # Focus on the element
-            await asyncio.sleep(0.3)
-            await search_box.fill('')  # Clear any existing text
-            await asyncio.sleep(0.2)
-            await search_box.type(query, delay=50)  # Type with delay for reliability
+            # Type search query
+            await search_box.fill(query)
             await asyncio.sleep(0.5)
             
             # Submit search
-            logger.info("Submitting search...")
             await search_box.press("Enter")
-            
-            # Wait for search results page to load
-            await self.WAIT_FOR_PAGE_LOAD(timeout=30000)
-            await asyncio.sleep(2)  # Additional wait for results to render
+            await self.page.wait_for_load_state('networkidle', timeout=10000)
+            await asyncio.sleep(2)
             
             # Check for CAPTCHA on search results page
             captcha_found = await self.DETECT_CAPTCHA()
@@ -1370,9 +1789,20 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             title = await self.page.title()
             current_url = self.page.url
             
-            # Extract search results using READ_TOP_RESULTS
-            read_result = await self.READ_TOP_RESULTS(limit=5)
-            results = read_result.data.get("results", []) if read_result.success else []
+            # Try to extract first few search results
+            results = []
+            try:
+                result_elements = await self.page.query_selector_all('div[data-header-feature="0"] h3, div.g h3')
+                for i, elem in enumerate(result_elements[:5]):
+                    try:
+                        text = await elem.inner_text()
+                        link_elem = await elem.query_selector('a')
+                        link = await link_elem.get_attribute('href') if link_elem else None
+                        results.append({"title": text, "url": link})
+                    except:
+                        continue
+            except:
+                pass
             
             return TaskResult(
                 success=True,
@@ -1381,8 +1811,7 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
                     "title": title,
                     "url": current_url,
                     "query": query,
-                    "results": results,
-                    "results_count": len(results)
+                    "results": results
                 }
             )
         except Exception as e:
@@ -1396,13 +1825,13 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
     
     async def READ_PAGE(self, url: Optional[str] = None) -> TaskResult:
         """
-        Read and analyze the current page with detailed content extraction.
+        Read and analyze the current page.
         
         Args:
             url: Optional URL to read (if not provided, reads current page)
             
         Returns:
-            TaskResult with detailed page analysis
+            TaskResult with page analysis
         """
         try:
             await self.initialize_browser()
@@ -1441,85 +1870,90 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             current_url = self.page.url
             title = await self.page.title()
             
-            # Extract detailed page content
+            # Extract page content
             try:
-                # Get main content with better extraction
-                body_text = await self.page.evaluate("""() => {
-                    // Try to get main content area
-                    const main = document.querySelector('main, article, .content, .post, .article, [role="main"]');
-                    if (main) {
-                        return main.innerText;
-                    }
-                    return document.body.innerText;
-                }""")
+                # Check if this is a Wikipedia page and extract more detailed content
+                is_wikipedia = 'wikipedia.org' in current_url
+                
+                if is_wikipedia:
+                    # Extract Wikipedia-specific content
+                    wikipedia_content = await self.page.evaluate("""() => {
+                        // Get main article content
+                        const content = document.querySelector('#content, #mw-content-text, .mw-parser-output');
+                        if (content) {
+                            // Remove unwanted elements (nav, references, etc.)
+                            const unwanted = content.querySelectorAll('.navbox, .reference, .mw-references-wrap, .mw-jump-link, .mw-editsection, .infobox');
+                            unwanted.forEach(el => el.remove());
+                            return content.innerText;
+                        }
+                        return document.body.innerText;
+                    }""")
+                    body_text = wikipedia_content if wikipedia_content else await self.page.evaluate('() => document.body.innerText')
+                    
+                    # Extract Wikipedia infobox
+                    infobox_data = None
+                    try:
+                        infobox_data = await self.page.evaluate("""() => {
+                            const infobox = document.querySelector('.infobox, .infobox_v2');
+                            if (!infobox) return null;
+                            const rows = Array.from(infobox.querySelectorAll('tr'));
+                            const data = {};
+                            rows.forEach(row => {
+                                const header = row.querySelector('th');
+                                const value = row.querySelector('td');
+                                if (header && value) {
+                                    const key = header.innerText.trim();
+                                    const val = value.innerText.trim();
+                                    if (key && val) {
+                                        data[key] = val;
+                                    }
+                                }
+                            });
+                            return Object.keys(data).length > 0 ? data : null;
+                        }""")
+                    except:
+                        pass
+                else:
+                    # Get main content for non-Wikipedia pages
+                    body_text = await self.page.evaluate('() => document.body.innerText')
+                    infobox_data = None
                 
                 # Get meta description
                 meta_desc = await self.page.evaluate("""() => {
-                    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
+                    const meta = document.querySelector('meta[name="description"]');
                     return meta ? meta.content : "";
                 }""")
                 
-                # Get headings (H1, H2, H3)
+                # Get headings (more comprehensive)
                 headings = await self.page.evaluate("""() => {
-                    const h1s = Array.from(document.querySelectorAll("h1")).map(h => h.innerText).filter(t => t.trim());
-                    const h2s = Array.from(document.querySelectorAll("h2")).map(h => h.innerText).filter(t => t.trim());
-                    const h3s = Array.from(document.querySelectorAll("h3")).map(h => h.innerText).filter(t => t.trim());
-                    return {h1: h1s.slice(0, 5), h2: h2s.slice(0, 10), h3: h3s.slice(0, 10)};
+                    const h1s = Array.from(document.querySelectorAll("h1")).map(h => h.innerText.trim()).filter(t => t);
+                    const h2s = Array.from(document.querySelectorAll("h2")).map(h => h.innerText.trim()).filter(t => t);
+                    const h3s = Array.from(document.querySelectorAll("h3")).map(h => h.innerText.trim()).filter(t => t);
+                    return {h1: h1s, h2: h2s, h3: h3s};
                 }""")
                 
-                # Get article content (for news sites)
-                article_content = await self.page.evaluate("""() => {
-                    const article = document.querySelector('article, .article-body, .post-content, .entry-content, [class*="article"], [class*="content"]');
-                    if (article) {
-                        // Get paragraphs
-                        const paragraphs = Array.from(article.querySelectorAll('p')).map(p => p.innerText).filter(t => t.trim() && t.length > 20);
-                        return paragraphs.slice(0, 10).join('\\n\\n');
-                    }
-                    return "";
-                }""")
-                
-                # Get publication date if available
-                pub_date = await self.page.evaluate("""() => {
-                    const time = document.querySelector('time[datetime], time[pubdate], [class*="date"], [class*="published"]');
-                    if (time) {
-                        return time.getAttribute('datetime') || time.innerText || time.getAttribute('pubdate');
-                    }
-                    // Try meta tags
-                    const metaDate = document.querySelector('meta[property="article:published_time"], meta[name="pubdate"]');
-                    return metaDate ? metaDate.content : "";
-                }""")
-                
-                # Get author if available
-                author = await self.page.evaluate("""() => {
-                    const author = document.querySelector('[rel="author"], .author, [class*="author"], [itemprop="author"]');
-                    if (author) {
-                        return author.innerText || author.getAttribute('content');
-                    }
-                    const metaAuthor = document.querySelector('meta[name="author"], meta[property="article:author"]');
-                    return metaAuthor ? metaAuthor.content : "";
-                }""")
-                
-                # Extract key points (first few paragraphs or bullet points)
-                key_points = await self.page.evaluate("""() => {
-                    const article = document.querySelector('article, .article-body, .post-content');
-                    if (article) {
-                        const points = Array.from(article.querySelectorAll('p, li')).map(el => el.innerText)
-                            .filter(t => t.trim() && t.length > 30 && t.length < 500)
-                            .slice(0, 5);
-                        return points;
-                    }
-                    return [];
-                }""")
-                
+                # Extract key paragraphs from Wikipedia
+                key_paragraphs = []
+                if is_wikipedia:
+                    try:
+                        key_paragraphs = await self.page.evaluate("""() => {
+                            const content = document.querySelector('#mw-content-text, .mw-parser-output');
+                            if (!content) return [];
+                            const paragraphs = Array.from(content.querySelectorAll('p'));
+                            return paragraphs
+                                .map(p => p.innerText.trim())
+                                .filter(p => p.length > 50 && p.length < 500)
+                                .slice(0, 5);
+                        }""")
+                    except:
+                        pass
             except Exception as e:
-                logger.warning(f"Error extracting detailed page content: {e}")
+                logger.warning(f"Error extracting page content: {e}")
                 body_text = ""
                 meta_desc = ""
                 headings = {}
-                article_content = ""
-                pub_date = ""
-                author = ""
-                key_points = []
+                infobox_data = None
+                key_paragraphs = []
             
             # Analyze for errors or issues
             issues = []
@@ -1531,260 +1965,37 @@ Return your analysis as JSON with: action, target, reason, expected_outcome"""
             except:
                 pass
             
-            # Extract summary using LLM if available
-            summary = ""
-            if self.llm_service and body_text:
-                try:
-                    summary_prompt = f"""Summarize the key information from this page content in 2-3 sentences:
-
-Title: {title}
-Content: {body_text[:1000]}
-
-Provide a concise summary of the main points."""
-                    summary = self.llm_service.generate_content(summary_prompt)
-                    summary = summary.strip()[:300]  # Limit summary length
-                except Exception as e:
-                    logger.debug(f"Could not generate summary: {e}")
+            # Build data dictionary
+            data = {
+                "title": title,
+                "url": current_url,
+                "content": body_text[:3000] if body_text else "",  # Increased content length
+                "content_preview": body_text[:500] if body_text else "",
+                "meta_description": meta_desc,
+                "headings": headings,
+                "issues": issues
+            }
+            
+            # Add Wikipedia-specific data
+            if 'wikipedia.org' in current_url:
+                if infobox_data:
+                    data["infobox"] = infobox_data
+                if key_paragraphs:
+                    data["key_paragraphs"] = key_paragraphs
+                data["content_length"] = len(body_text) if body_text else 0
             
             return TaskResult(
                 success=True,
                 message=f"Successfully read page: {title}",
-                data={
-                    "title": title,
-                    "url": current_url,
-                    "content_preview": body_text[:1000] if body_text else "",
-                    "article_content": article_content[:2000] if article_content else "",
-                    "meta_description": meta_desc,
-                    "headings": headings,
-                    "publication_date": pub_date,
-                    "author": author,
-                    "key_points": key_points if isinstance(key_points, list) else [],
-                    "summary": summary,
-                    "content_length": len(body_text) if body_text else 0,
-                    "issues": issues
-                }
+                data=data
             )
         except Exception as e:
-            logger.error(f"Error reading page: {e}", exc_info=True)
+            logger.error(f"Error reading page: {e}")
             return TaskResult(
                 success=False,
                 message="Failed to read page",
                 error=str(e),
                 data={"url": url or "current page"}
-            )
-    
-    async def EXTRACT_DETAILED_RESULTS(self, results: List[Dict], max_results: int = 3) -> TaskResult:
-        """
-        Extract detailed information from top search results by visiting each page.
-        
-        Args:
-            results: List of result dictionaries with title and url
-            max_results: Maximum number of results to visit in detail
-            
-        Returns:
-            TaskResult with detailed extraction from top results
-        """
-        try:
-            if not results:
-                return TaskResult(
-                    success=False,
-                    message="No results to extract",
-                    error="No results provided",
-                    data={"results": []}
-                )
-            
-            detailed_results = []
-            visited_urls = []
-            
-            # Visit top results and extract detailed information
-            for i, result in enumerate(results[:max_results]):
-                try:
-                    url = result.get("url", "")
-                    title = result.get("title", "")
-                    
-                    if not url or url in visited_urls:
-                        continue
-                    
-                    # Normalize and validate URL
-                    if url.startswith('//'):
-                        url = 'https:' + url
-                    elif url.startswith('/'):
-                        # Relative URL - skip or try to construct absolute
-                        logger.warning(f"Skipping relative URL: {url}")
-                        continue
-                    elif not url.startswith('http'):
-                        logger.warning(f"Skipping invalid URL: {url}")
-                        continue
-                    
-                    # Skip DuckDuckGo redirect URLs that aren't resolved
-                    if 'duckduckgo.com' in url and '/l/?uddg=' not in url and '?q=' in url:
-                        # This is a DuckDuckGo search page, not a result URL
-                        logger.warning(f"Skipping DuckDuckGo search page: {url}")
-                        continue
-                    
-                    logger.info(f"Extracting details from result {i+1}/{min(len(results), max_results)}: {title}")
-                    logger.debug(f"URL: {url}")
-                    
-                    # Open URL in new tab to avoid navigation issues
-                    detail_page = None
-                    try:
-                        if self.context:
-                            detail_page = await self.context.new_page()
-                            try:
-                                await detail_page.goto(url, wait_until='domcontentloaded', timeout=20000)
-                                await asyncio.sleep(2)  # Wait for page to load
-                            except Exception as nav_error:
-                                logger.warning(f"Navigation error for {url}: {nav_error}")
-                                if detail_page:
-                                    await detail_page.close()
-                                detailed_results.append({
-                                    "title": title,
-                                    "url": url,
-                                    "snippet": result.get("snippet", ""),
-                                    "error": f"Navigation failed: {str(nav_error)}",
-                                    "extracted": False
-                                })
-                                continue
-                            
-                            # Check for CAPTCHA
-                            captcha_found = False
-                            try:
-                                # Quick CAPTCHA check
-                                captcha_selectors = ['iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]', '.g-recaptcha']
-                                for selector in captcha_selectors:
-                                    elem = await detail_page.query_selector(selector)
-                                    if elem:
-                                        captcha_found = True
-                                        break
-                            except:
-                                pass
-                            
-                            if captcha_found:
-                                logger.warning(f"CAPTCHA detected on {url}, skipping detailed extraction")
-                                if detail_page:
-                                    await detail_page.close()
-                                detailed_results.append({
-                                    "title": title,
-                                    "url": url,
-                                    "snippet": result.get("snippet", ""),
-                                    "error": "CAPTCHA_DETECTED",
-                                    "extracted": False
-                                })
-                                continue
-                            
-                            # Extract detailed content
-                            page_data = await detail_page.evaluate("""() => {
-                                const data = {};
-                                
-                                // Title
-                                data.title = document.title;
-                                
-                                // Main content
-                                const main = document.querySelector('main, article, .content, .post, .article, [role="main"]');
-                                data.content = main ? main.innerText : document.body.innerText;
-                                
-                                // Article content
-                                const article = document.querySelector('article, .article-body, .post-content, .entry-content');
-                                if (article) {
-                                    const paragraphs = Array.from(article.querySelectorAll('p')).map(p => p.innerText).filter(t => t.trim() && t.length > 20);
-                                    data.article_paragraphs = paragraphs.slice(0, 10);
-                                }
-                                
-                                // Meta description
-                                const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
-                                data.meta_description = meta ? meta.content : "";
-                                
-                                // Publication date
-                                const time = document.querySelector('time[datetime], [class*="date"], [class*="published"]');
-                                data.pub_date = time ? (time.getAttribute('datetime') || time.innerText) : "";
-                                
-                                // Author
-                                const author = document.querySelector('[rel="author"], .author, [class*="author"]');
-                                data.author = author ? author.innerText : "";
-                                
-                                // Headings
-                                data.headings = {
-                                    h1: Array.from(document.querySelectorAll("h1")).map(h => h.innerText).filter(t => t.trim()).slice(0, 3),
-                                    h2: Array.from(document.querySelectorAll("h2")).map(h => h.innerText).filter(t => t.trim()).slice(0, 5)
-                                };
-                                
-                                return data;
-                            }""")
-                            
-                            if detail_page:
-                                await detail_page.close()
-                            
-                            # Create summary using LLM if available
-                            summary = ""
-                            if self.llm_service and page_data.get("content"):
-                                try:
-                                    content_preview = page_data.get("content", "")[:1500]
-                                    summary_prompt = f"""Summarize this news article in 2-3 sentences highlighting the key points:
-
-Title: {page_data.get('title', title)}
-Content: {content_preview}
-
-Provide a concise summary."""
-                                    summary = self.llm_service.generate_content(summary_prompt)
-                                    summary = summary.strip()[:300]
-                                except Exception as e:
-                                    logger.debug(f"Could not generate summary for {url}: {e}")
-                            
-                            detailed_results.append({
-                                "title": page_data.get("title", title),
-                                "url": url,
-                                "snippet": result.get("snippet", ""),
-                                "meta_description": page_data.get("meta_description", ""),
-                                "content_preview": page_data.get("content", "")[:500],
-                                "article_paragraphs": page_data.get("article_paragraphs", []),
-                                "publication_date": page_data.get("pub_date", ""),
-                                "author": page_data.get("author", ""),
-                                "headings": page_data.get("headings", {}),
-                                "summary": summary,
-                                "extracted": True
-                            })
-                            
-                            visited_urls.append(url)
-                            logger.info(f"Successfully extracted details from: {title}")
-                            
-                    except Exception as e:
-                        logger.warning(f"Error extracting details from {url}: {e}")
-                        if detail_page:
-                            try:
-                                await detail_page.close()
-                            except:
-                                pass
-                        detailed_results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": result.get("snippet", ""),
-                            "error": str(e),
-                            "extracted": False
-                        })
-                    
-                    # Small delay between requests
-                    await asyncio.sleep(1)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing result {i+1}: {e}")
-                    continue
-            
-            return TaskResult(
-                success=True,
-                message=f"Extracted detailed information from {len(detailed_results)} results",
-                data={
-                    "detailed_results": detailed_results,
-                    "count": len(detailed_results),
-                    "successfully_extracted": sum(1 for r in detailed_results if r.get("extracted", False))
-                }
-            )
-        except Exception as e:
-            logger.error(f"Error extracting detailed results: {e}", exc_info=True)
-            return TaskResult(
-                success=False,
-                message="Failed to extract detailed results",
-                error=str(e),
-                data={"results": results}
             )
     
     async def FIX_ISSUE(self, issue_description: str) -> TaskResult:
@@ -1912,7 +2123,132 @@ Provide a concise summary."""
                         return result
                 
                 # After opening, read the page (only if no CAPTCHA)
-                if not self.captcha_detected:
+                if not self.captcha_detected and result.success:
+                    # Check if we need to search within the website
+                    # If the original query contains search terms (e.g., "find X on wikipedia"), 
+                    # we should search within the opened website
+                    # Correct typos in original query for website detection
+                    original_query = self._correct_website_typos(self.task_query)
+                    original_query_lower = original_query.lower()
+                    website_domains = ['wikipedia', 'wikipida', 'wikipeda', 'wikipidia', 'wikepedia', 'wikpedia', 'wkipedia', 
+                                      'reddit', 'redit', 'redditt', 
+                                      'github', 'githu', 'githb', 
+                                      'stackoverflow', 'stackoverflw', 'stackoverfow', 
+                                      'youtube', 'youtue', 'youtub', 
+                                      'twitter', 'twiter', 'twittr', 
+                                      'facebook', 'facebok', 'faceboook']
+                    
+                    # Check if query has both website and search terms
+                    has_website = any(domain in original_query_lower for domain in website_domains)
+                    has_search_terms = any(word in original_query_lower for word in ['find', 'search', 'look for', 'about', 'information'])
+                    
+                    if has_website and has_search_terms:
+                        # Extract search terms from original query (remove website and command words)
+                        search_terms = original_query  # Use corrected query (typos already fixed)
+                        
+                        # Remove website mentions (including typos)
+                        website_patterns = website_domains + ['wikipedia', 'wikipida', 'wikipeda', 'wikipidia', 'wikepedia', 'wikpedia', 'wkipedia']
+                        for domain in website_patterns:
+                            search_terms = re.sub(f'\\b{domain}\\b', '', search_terms, flags=re.IGNORECASE)
+                        
+                        # Remove command words (including typos and filler words)
+                        command_words = ['find', 'search', 'look for', 'on', 'from', 'visit', 'vist', 'visti', 'vistit', 
+                                       'open', 'go to', 'navigate to', 'check', 'read', 'about', 'it', 'and', 'the', 'a', 'an']
+                        for word in command_words:
+                            # Remove word with word boundaries to avoid partial matches
+                            search_terms = re.sub(r'\b' + re.escape(word) + r'\b', '', search_terms, flags=re.IGNORECASE)
+                        
+                        # Remove extra spaces and clean up
+                        search_terms = re.sub(r'\s+', ' ', search_terms).strip()
+                        # Remove leading/trailing "and" and other connectors
+                        search_terms = re.sub(r'^\s*(and|or|but)\s+|\s+(and|or|but)\s*$', '', search_terms, flags=re.IGNORECASE).strip()
+                        
+                        # Final cleanup - remove any remaining single-letter words and extra connectors
+                        words = search_terms.split()
+                        filtered_words = [w for w in words if len(w) > 1 and w.lower() not in ['and', 'or', 'but', 'the', 'a', 'an', 'it', 'is', 'are', 'was', 'were']]
+                        search_terms = ' '.join(filtered_words).strip()
+                        
+                        logger.info(f"Extracted search terms: '{search_terms}' from original query: '{self.task_query}'")
+                        
+                        if search_terms and len(search_terms) > 3:
+                            logger.info(f"Searching within website for: {search_terms}")
+                            # Try to find and use the website's search box
+                            try:
+                                # Common search box selectors
+                                search_selectors = [
+                                    'input[type="search"]',
+                                    'input[name="search"]',
+                                    'input[id*="search"]',
+                                    'input[placeholder*="Search"]',
+                                    'input[aria-label*="Search"]',
+                                    '#searchInput',  # Wikipedia
+                                    '#search',  # Common
+                                    '.search-input',  # Common
+                                ]
+                                
+                                search_box = None
+                                for selector in search_selectors:
+                                    try:
+                                        search_box = await self.page.query_selector(selector)
+                                        if search_box:
+                                            logger.info(f"Found search box with selector: {selector}")
+                                            break
+                                    except:
+                                        continue
+                                
+                                if search_box:
+                                    # Type search terms and submit
+                                    await search_box.fill(search_terms)
+                                    await asyncio.sleep(0.5)
+                                    await search_box.press("Enter")
+                                    # Wait for navigation to start
+                                    await asyncio.sleep(1)
+                                    # Wait for page load (use domcontentloaded for better reliability)
+                                    try:
+                                        await self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                                    except Exception as e:
+                                        logger.warning(f"Timeout waiting for domcontentloaded: {e}")
+                                    await asyncio.sleep(2)  # Additional wait for content to render
+                                    
+                                    # Check for CAPTCHA after search
+                                    captcha_found = await self.DETECT_CAPTCHA()
+                                    if captcha_found:
+                                        self.captcha_detected = True
+                                        self.captcha_url = self.page.url
+                                        title = await self.page.title()
+                                        return TaskResult(
+                                            success=False,
+                                            message=f"CAPTCHA detected after searching within website",
+                                            error="CAPTCHA_DETECTED",
+                                            data={"title": title, "url": self.page.url}
+                                        )
+                                    
+                                    # Read the search results page
+                                    read_result = await self.READ_PAGE()
+                                    if read_result.success:
+                                        self.RECORD_STEP(f"Searched within website for: {search_terms}", read_result)
+                                        
+                                        # Extract detailed content from Wikipedia search results
+                                        if 'wikipedia' in original_query_lower:
+                                            logger.info("Extracting detailed content from Wikipedia search results...")
+                                            detailed_results = await self._extract_wikipedia_search_results(search_terms)
+                                            if detailed_results:
+                                                read_result.data["detailed_results"] = detailed_results
+                                                read_result.data["extraction_summary"] = {
+                                                    "total_results": len(detailed_results),
+                                                    "search_terms": search_terms,
+                                                    "source": "wikipedia"
+                                                }
+                                                # Update the message to include extraction summary
+                                                read_result.message = f"Successfully searched Wikipedia for '{search_terms}' and extracted detailed content from {len(detailed_results)} articles"
+                                        
+                                        return read_result
+                                else:
+                                    logger.info("Search box not found. Reading the opened page instead.")
+                            except Exception as e:
+                                logger.warning(f"Error searching within website: {e}. Reading the opened page instead.")
+                    
+                    # Read the page (if no search was performed or search failed)
                     read_result = await self.READ_PAGE()
                     self.RECORD_STEP(f"Read page content from {plan.target}", read_result)
                     
@@ -1933,20 +2269,29 @@ Provide a concise summary."""
                         
                         logger.warning("CAPTCHA not resolved. Stopping automation.")
                         return read_result
+                    
+                    # Successfully read the page
+                    return read_result
+                else:
+                    return result
                 
-            elif plan.action == "SEARCH_DUCKDUCKGO":
-                # Step 1: Attempt primary search on DuckDuckGo (default search engine)
+            elif plan.action == "SEARCH_DUCKDUCKGO" or plan.action == "SEARCH_GOOGLE":
+                # Map SEARCH_GOOGLE to SEARCH_DUCKDUCKGO
+                if plan.action == "SEARCH_GOOGLE":
+                    logger.info("Mapping SEARCH_GOOGLE to SEARCH_DUCKDUCKGO (DuckDuckGo is default search engine)")
+                    plan.action = "SEARCH_DUCKDUCKGO"
+                
+                # Step 1: Attempt primary search on DuckDuckGo
                 result = await self.SEARCH_DUCKDUCKGO(plan.target)
                 self.RECORD_STEP(f"Searched DuckDuckGo for: {plan.target}", result)
                 
-                # Step 2: Check if CAPTCHA was detected or search failed
-                # NO GOOGLE FALLBACK - only use DuckDuckGo and other non-Google fallbacks
-                if result.error == "CAPTCHA_DETECTED" or not result.success:
-                    logger.warning("DuckDuckGo search failed or blocked. Trying alternative fallback strategies (excluding Google)...")
+                # Step 2: Check if CAPTCHA was detected
+                if result.error == "CAPTCHA_DETECTED":
+                    logger.warning("CAPTCHA detected on DuckDuckGo. Trying fallback strategies...")
                     
-                    # Get fallback strategies (NO GOOGLE)
+                    # Get fallback strategies
                     fallbacks = await self.REASON_AND_CHOOSE_FALLBACK(plan.target)
-                    logger.info(f"Trying {len(fallbacks)} fallback strategies (NO GOOGLE)...")
+                    logger.info(f"Trying {len(fallbacks)} fallback strategies...")
                     
                     # Try each fallback
                     fallback_success = False
@@ -1974,50 +2319,7 @@ Provide a concise summary."""
                         
                         # Check if fallback succeeded
                         if fallback_result.success and fallback_result.error != "CAPTCHA_DETECTED":
-                            logger.info(f"Fallback {i} succeeded! Extracting detailed information from results...")
-                            
-                            # Get results from fallback
-                            results = fallback_result.data.get("results", [])
-                            
-                            if results:
-                                # Extract detailed information from top results
-                                detailed_extraction = await self.EXTRACT_DETAILED_RESULTS(results, max_results=3)
-                                self.RECORD_STEP(f"Extract detailed information from fallback {i} results", detailed_extraction)
-                                
-                                if detailed_extraction.success:
-                                    detailed_results = detailed_extraction.data.get("detailed_results", [])
-                                    fallback_result.data["detailed_results"] = detailed_results
-                                    fallback_result.data["extraction_summary"] = {
-                                        "total_results": len(results),
-                                        "detailed_extractions": len(detailed_results),
-                                        "successfully_extracted": detailed_extraction.data.get("successfully_extracted", 0),
-                                        "source": fallback.get('description', 'fallback')
-                                    }
-                                    
-                                    # Create comprehensive summary using LLM if available
-                                    if self.llm_service and detailed_results:
-                                        try:
-                                            summary_prompt = f"""Based on these search results about "{plan.target}", provide a comprehensive summary:
-
-"""
-                                            for i, dr in enumerate(detailed_results[:3], 1):
-                                                if dr.get("extracted"):
-                                                    summary_prompt += f"""
-Result {i}:
-Title: {dr.get('title', 'N/A')}
-Summary: {dr.get('summary', dr.get('content_preview', 'N/A')[:200])}
-URL: {dr.get('url', 'N/A')}
-
-"""
-                                            summary_prompt += """
-Provide a comprehensive summary of the key information found, highlighting the main points and latest developments."""
-                                            
-                                            comprehensive_summary = self.llm_service.generate_content(summary_prompt)
-                                            fallback_result.data["comprehensive_summary"] = comprehensive_summary.strip()
-                                            logger.info("Generated comprehensive summary using LLM")
-                                        except Exception as e:
-                                            logger.warning(f"Could not generate comprehensive summary: {e}")
-                            
+                            logger.info(f"Fallback {i} succeeded! Using results from {fallback.get('description')}")
                             fallback_success = True
                             
                             # Close new tab if we opened one
@@ -2028,7 +2330,7 @@ Provide a comprehensive summary of the key information found, highlighting the m
                             except:
                                 pass
                             
-                            # Return successful result with detailed extraction
+                            # Return successful result
                             return fallback_result
                         
                         # If fallback also hit CAPTCHA, continue to next fallback
@@ -2093,69 +2395,60 @@ Provide a comprehensive summary of the key information found, highlighting the m
                             }
                         )
                 
-                # Step 3: Process results and extract detailed information (only if no CAPTCHA)
+                # Step 3: Read the search results page and extract detailed content (only if no CAPTCHA)
                 if not self.captcha_detected and result.success:
-                    # Get results from the search
-                    results = result.data.get("results", [])
+                    read_result = await self.READ_TOP_RESULTS(limit=5)
+                    self.RECORD_STEP("Read top search results", read_result)
                     
-                    if results:
-                        logger.info(f"Found {len(results)} search results. Extracting detailed information...")
+                    # Check if CAPTCHA was detected during read
+                    if read_result.error == "CAPTCHA_DETECTED":
+                        logger.warning("CAPTCHA detected while reading results. Trying fallbacks...")
                         
-                        # Extract detailed information from top results
-                        detailed_extraction = await self.EXTRACT_DETAILED_RESULTS(results, max_results=3)
-                        self.RECORD_STEP("Extract detailed information from top results", detailed_extraction)
-                        
-                        if detailed_extraction.success:
-                            detailed_results = detailed_extraction.data.get("detailed_results", [])
-                            result.data["detailed_results"] = detailed_results
-                            result.data["extraction_summary"] = {
-                                "total_results": len(results),
-                                "detailed_extractions": len(detailed_results),
-                                "successfully_extracted": detailed_extraction.data.get("successfully_extracted", 0)
-                            }
+                        # Try fallbacks again
+                        fallbacks = await self.REASON_AND_CHOOSE_FALLBACK(plan.target)
+                        for i, fallback in enumerate(fallbacks, 1):
+                            logger.info(f"Fallback {i}/{len(fallbacks)}: {fallback.get('description')}")
+                            fallback_result = await self.EXECUTE_FALLBACK_STRATEGY(fallback, plan.target)
+                            self.RECORD_STEP(f"Fallback attempt {i}: {fallback.get('description')}", fallback_result)
                             
-                            # Create comprehensive summary using LLM if available
-                            if self.llm_service and detailed_results:
+                            if fallback_result.success and fallback_result.error != "CAPTCHA_DETECTED":
+                                logger.info(f"Fallback {i} succeeded!")
+                                return fallback_result
+                        
+                        # All fallbacks failed
+                        return read_result
+                    
+                    # Successfully read results - now extract detailed content
+                    if read_result.success:
+                        result.data["top_results"] = read_result.data.get("results", [])
+                        
+                        # Extract detailed content from top results
+                        logger.info(f"Extracting detailed content from top {min(3, len(read_result.data.get('results', [])))} results...")
+                        detailed_results = []
+                        for i, res in enumerate(read_result.data.get("results", [])[:3]):
+                            if res.get("url") and res["url"].startswith("http"):
                                 try:
-                                    summary_prompt = f"""Based on these search results about "{plan.target}", provide a comprehensive summary:
-
-"""
-                                    for i, dr in enumerate(detailed_results[:3], 1):
-                                        if dr.get("extracted"):
-                                            summary_prompt += f"""
-Result {i}:
-Title: {dr.get('title', 'N/A')}
-Summary: {dr.get('summary', dr.get('content_preview', 'N/A')[:200])}
-URL: {dr.get('url', 'N/A')}
-
-"""
-                                    summary_prompt += """
-Provide a comprehensive summary of the key information found, highlighting the main points and latest developments."""
-                                    
-                                    comprehensive_summary = self.llm_service.generate_content(summary_prompt)
-                                    result.data["comprehensive_summary"] = comprehensive_summary.strip()
-                                    logger.info("Generated comprehensive summary using LLM")
+                                    logger.info(f"Extracting content from result {i+1}: {res.get('title', res.get('url'))}")
+                                    detail_result = await self.EXTRACT_DETAILED_CONTENT(res["url"], max_content_length=2000)
+                                    if detail_result.success:
+                                        detailed_results.append(detail_result.data)
+                                        self.RECORD_STEP(f"Extracted detailed content from: {res.get('title', res.get('url'))}", detail_result)
+                                    elif detail_result.error == "CAPTCHA_DETECTED":
+                                        logger.warning(f"CAPTCHA detected on result {i+1}, skipping detailed extraction")
+                                    else:
+                                        logger.warning(f"Failed to extract content from result {i+1}: {detail_result.message}")
                                 except Exception as e:
-                                    logger.warning(f"Could not generate comprehensive summary: {e}")
-                            
-                            logger.info(f"Successfully extracted detailed information from {len(detailed_results)} results")
-                        else:
-                            logger.warning("Detailed extraction failed, but basic results are available")
-                            result.data["detailed_results"] = []
-                            result.data["extraction_summary"] = {
-                                "total_results": len(results),
-                                "detailed_extractions": 0,
-                                "error": detailed_extraction.error
-                            }
-                    else:
-                        logger.warning("No search results found")
-                        result.data["detailed_results"] = []
+                                    logger.error(f"Error extracting content from result {i+1}: {e}")
+                                    continue
+                        
+                        result.data["detailed_results"] = detailed_results
                         result.data["extraction_summary"] = {
-                            "total_results": 0,
-                            "detailed_extractions": 0
+                            "total_results": len(read_result.data.get("results", [])),
+                            "detailed_extractions": len(detailed_results),
+                            "query": plan.target
                         }
-                    
-                    return result
+                        
+                        return result
                 
                 # Return the original result if no fallbacks were needed
                 return result
