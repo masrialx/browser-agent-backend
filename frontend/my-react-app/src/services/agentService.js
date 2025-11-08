@@ -1,18 +1,21 @@
 /**
- * Browser Agent Service - API communication for browser automation
+ * API Service for Browser Agent
+ * Handles all communication with the backend API
+ * Uses Vite proxy in development, or direct URL in production
  */
-const API_BASE_URL = process.env.VITE_API_URL || 'http://localhost:5000/api/v1/browser-agent';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : 'http://localhost:5000');
 
 /**
  * Execute a browser task
- * @param {string} query - The task query to execute
- * @param {string} [agentId] - Optional agent identifier
- * @param {string} [userId] - Optional user identifier
- * @returns {Promise<Object>} The execution results
+ * @param {string} query - The user query describing the task
+ * @param {string} agentId - Optional agent identifier
+ * @param {string} userId - Optional user identifier
+ * @returns {Promise<Object>} The API response
  */
 export const executeBrowserTask = async (query, agentId = null, userId = null) => {
   try {
-    const response = await fetch(`${API_BASE_URL}/execute`, {
+    const response = await fetch(`${API_BASE_URL}/api/v1/browser-agent/execute`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -29,7 +32,8 @@ export const executeBrowserTask = async (query, agentId = null, userId = null) =
       throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
     }
 
-    return await response.json();
+    const data = await response.json();
+    return data;
   } catch (error) {
     console.error('Error executing browser task:', error);
     throw error;
@@ -37,12 +41,12 @@ export const executeBrowserTask = async (query, agentId = null, userId = null) =
 };
 
 /**
- * Health check for the browser agent service
+ * Health check endpoint
  * @returns {Promise<Object>} Health status
  */
 export const checkHealth = async () => {
   try {
-    const response = await fetch(`${API_BASE_URL}/health`, {
+    const response = await fetch(`${API_BASE_URL}/api/v1/browser-agent/health`, {
       method: 'GET',
     });
 
@@ -50,7 +54,8 @@ export const checkHealth = async () => {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    return await response.json();
+    const data = await response.json();
+    return data;
   } catch (error) {
     console.error('Error checking health:', error);
     throw error;
