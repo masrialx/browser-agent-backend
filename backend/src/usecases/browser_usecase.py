@@ -85,10 +85,21 @@ class BrowserUseCase:
             
             # Format steps to match required structure
             formatted_steps = []
+            captcha_detected = False
+            
             for step in recorded_steps:
                 # Ensure result has the required structure
                 result = step.get("result", {})
+                step_desc = step.get("step", "Unknown step")
+                
                 if isinstance(result, dict):
+                    # Check if this step contains a CAPTCHA error
+                    if result.get("error") == "CAPTCHA_DETECTED":
+                        captcha_detected = True
+                        # Ensure the step description indicates CAPTCHA detection
+                        if "CAPTCHA" not in step_desc.upper():
+                            step_desc = f"Detect CAPTCHA and pause: {step_desc}"
+                    
                     # Ensure data field exists with title and url
                     if "data" not in result:
                         result["data"] = {}
@@ -107,14 +118,41 @@ class BrowserUseCase:
                         result["success"] = step.get("success", False)
                 
                 formatted_step = {
-                    "step": step.get("step", "Unknown step"),
+                    "step": step_desc,
                     "result": result,
                     "success": step.get("success", False)
                 }
                 formatted_steps.append(formatted_step)
             
+            # If final result has CAPTCHA error, ensure it's in steps
+            if final_result.error == "CAPTCHA_DETECTED" and not captcha_detected:
+                captcha_step = {
+                    "step": "Detect CAPTCHA and pause",
+                    "result": final_result.dict(),
+                    "success": False
+                }
+                # Ensure proper structure for CAPTCHA step
+                if "data" not in captcha_step["result"]:
+                    captcha_step["result"]["data"] = {}
+                if "title" not in captcha_step["result"]["data"]:
+                    captcha_step["result"]["data"]["title"] = final_result.data.get("title", "")
+                if "url" not in captcha_step["result"]["data"]:
+                    captcha_step["result"]["data"]["url"] = final_result.data.get("url", "")
+                formatted_steps.append(captcha_step)
+                captcha_detected = True
+            
             # Calculate overall success
-            overall_success = all(step.get("success", False) for step in formatted_steps) and final_result.success
+            # If CAPTCHA was detected but later resolved and task completed, mark as successful
+            # Check if final result is successful (meaning CAPTCHA was resolved and task completed)
+            if final_result.success and final_result.error != "CAPTCHA_DETECTED":
+                # Task completed successfully, even if CAPTCHA was detected earlier
+                overall_success = True
+            elif captcha_detected and final_result.error == "CAPTCHA_DETECTED":
+                # CAPTCHA detected and not resolved
+                overall_success = False
+            else:
+                # Normal success calculation
+                overall_success = all(step.get("success", False) for step in formatted_steps) and final_result.success
             
             # Build response in required format
             response = {
@@ -125,7 +163,25 @@ class BrowserUseCase:
             }
             
             # Cleanup browser agent
-            await browser_agent.cleanup()
+            # If CAPTCHA detected and NOT resolved (task not completed), keep browser open
+            # If CAPTCHA was resolved and task completed, close browser normally
+            if final_result.error == "CAPTCHA_DETECTED" and not final_result.success:
+                logger.info("CAPTCHA detected but not resolved. Keeping browser open for user to complete CAPTCHA manually.")
+                # Don't close browser - let user see and complete CAPTCHA
+                await browser_agent.cleanup(force_close=False)
+                # Note: Browser remains open. User should complete CAPTCHA manually.
+            elif captcha_detected and final_result.success:
+                logger.info("CAPTCHA was resolved and task completed successfully. Closing browser.")
+                # CAPTCHA was resolved and task completed - close browser normally
+                await browser_agent.cleanup(force_close=True)
+            elif final_result.success:
+                logger.info("Task completed successfully. Closing browser.")
+                # Normal cleanup - close browser
+                await browser_agent.cleanup(force_close=True)
+            else:
+                # Error case - close browser
+                logger.info("Task failed. Closing browser.")
+                await browser_agent.cleanup(force_close=True)
             
             # Save workstream if agent_id is provided and task succeeded
             if agent_id and overall_success:
