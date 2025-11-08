@@ -254,3 +254,4 @@ The browser agent now provides **detailed information extraction** with:
 
 The agent now **focuses on completing tasks** with **detailed extraction** rather than just returning basic search results.
 
+
